@@ -113,7 +113,7 @@ trainer:
 
 logging:
   project: DP2
-  mode: offline
+  mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}
   tags: ["${task_name}"]
   id: null

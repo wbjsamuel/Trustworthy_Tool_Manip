@@ -1,32 +1,63 @@
 from typing import Union, Dict, Any
+import cv2
 import h5py
+import random
 import numpy as np
+import torch
+from torchvision.transforms import v2
 from torch.utils.data import Dataset
 
 from common.sampler import create_indices
 from model.common.normalizer import LinearNormalizer
-from common.normalize_util import get_image_range_normalizer, get_identity_normalizer_from_stat
+from common.normalize_util import get_image_range_normalizer
+
+
+def make_transform(resize_size: tuple = (256, 256)):
+    to_tensor = v2.ToImage()
+    resize = v2.Resize(resize_size, antialias=True)
+    to_float = v2.ToDtype(torch.float32, scale=True)
+    normalize = v2.Normalize(
+        mean=(0.485, 0.456, 0.406),
+        std=(0.229, 0.256, 0.225),
+    )
+    return v2.Compose([to_tensor, resize, to_float, normalize])
+
+
+def generate_skip_flags(episode_idx: np.ndarray, skip_interval: int) -> np.ndarray:
+    skip_flags = np.zeros(episode_idx[-1], dtype=bool)
+    for start in episode_idx[:-1]:
+        for i in range(skip_interval):
+            skip_flags[start+i] = True
+    return skip_flags
 
 
 class Dataset2D(Dataset):
     def __init__(self, 
                  dataset_path: str, 
                  horizon: int=1,
+                 n_obs_steps: int=1,
                  pad_before: int=0,
                  pad_after: int=0,
                  input_meta: Union[Dict[str, Any], None]=None,
-                 seperate_action: bool=False,
                  episode_mask: Union[np.ndarray, None]=None,
-                 use_mem: bool=False
+                 mask_head: bool=False,
+                 use_mem: bool=False,
+                 **kwargs
                  ) -> None:
         
         if use_mem:
             self.data = {}
             with h5py.File(dataset_path, 'r') as f:
                 for key in f.keys():
-                    self.data[key] = f[key][:]
+                    if isinstance(f[key], h5py.Group):
+                        for episode_key in f[key].keys():
+                            self.data[f"{key}/{episode_key}"] = f[key][episode_key][:]
+                    else:
+                        self.data[key] = f[key][:]           
         else:
             self.data = h5py.File(dataset_path, "r")
+
+        episode_idx = self.data["episode_idx"][:]
         episode_ends = self.data["episode_ends"][:]
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
@@ -36,9 +67,15 @@ class Dataset2D(Dataset):
                 pad_after=pad_after,
                 episode_mask=episode_mask
                 )
+        self.episode_idx = episode_idx
         self.horizon = horizon
+        self.n_obs_steps = n_obs_steps
         self.input_meta = input_meta
-        self.separate_action = seperate_action
+        self.mask_head = mask_head
+        self.skip_flags = generate_skip_flags(np.concatenate(([0], episode_ends)), horizon)
+        self.transform = make_transform((224, 384))
+        self.noise_mean = np.array((0.485, 0.456, 0.406), dtype=np.float32)
+        self.noise_std = np.array((0.229, 0.256, 0.225), dtype=np.float32)
 
     def __len__(self):
         return len(self.indices)
@@ -51,85 +88,86 @@ class Dataset2D(Dataset):
 
         return data
     
-    def get_all_actions(self) -> Dict[str, np.ndarray]:
-        res = {}
-        for key in self.input_meta.keys():
-            if key.startswith("action"):
-                res[key] = self.data[key][:]
-        
-        if not self.separate_action:
-            agent_num = len(res)
-            action_list = []
-            for i in range(agent_num):
-                key = f"action_{i}"
-                action_list.append(res[key])
-                del res[key]
-            res['action'] = np.concatenate(action_list, axis=-1)
-
-        return res
-    
     def get_normalizer(self, mode='limits', **kwargs):
-        if self.separate_action:
-            data = {}
-            for key, value in self.get_all_actions().items():
-                data[key] = value
-                data[key.replace("action", "state")] = value
-        else:
-            actions = self.get_all_actions()['action']
-            data = {
-                'action': actions,
-                'state': actions
-            }
+        data = {
+            'action': self.data['action'][:],
+            'qpos': self.data['qpos'][:]
+        }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         
         for key in self.input_meta["obs"].keys():
-            if key.startswith("head_cam"):
+            if key.startswith("cam"):
                 normalizer[key] = get_image_range_normalizer()
+                
         return normalizer
+    
+    def decode_per_frame_if_needed(self, v):
+        """Return frames as np.ndarray [T, H, W, C].
+        Inputs either:
+        - already-decoded array of shape [T, H, W, C]
+        - compressed buffer array of shape [T, L] uint8 (each row is one image)
+        """
+
+        arr = np.asarray(v)
+
+        # Compressed buffers: decode each row separately
+        frames = []
+        for i in range(arr.shape[0]):
+            buf = arr[i]
+            img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            img = self.transform(img_rgb)
+            frames.append(img)
+        return torch.stack(frames, axis=0)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
         res = {'obs': {},}
         obs_keys = list(self.input_meta["obs"].keys())
-        action_keys = [key for key in self.input_meta.keys() if key.startswith("action")]
         for key in obs_keys:
-            if key.startswith("head_cam"):
-                obs = self.data[key][buffer_start_idx:buffer_end_idx]
-                obs = np.array(obs).astype(np.float32) / 255.0
-                obs = np.moveaxis(obs, -1, -3)
-            elif key.startswith("state"):
-                obs = self.data[key.replace("state", "action")][buffer_start_idx:buffer_end_idx]
-                obs = np.array(obs).astype(np.float32)
+            start_idx = buffer_start_idx
+            end_idx = buffer_start_idx + self.n_obs_steps - sample_start_idx
+            if key.startswith("cam"):
+                obs = []
+                start_group_idx, start_frame_idx = self.episode_idx[start_idx]
+                end_group_idx, end_frame_idx = self.episode_idx[end_idx]
+                if start_group_idx == end_group_idx:
+                    images = self.data[f"episode_{start_group_idx}/{key}"][start_frame_idx:end_frame_idx]
+                else:
+                    raise NotImplementedError("Cross-episode sampling is not implemented yet.")
+                obs = self.decode_per_frame_if_needed(images).numpy()
             else:
-                obs = self.data[key][buffer_start_idx:buffer_end_idx]
+                obs = self.data[key][start_idx:end_idx]
                 obs = np.array(obs).astype(np.float32)
-            data = np.zeros((self.horizon, *obs.shape[1:]), dtype=np.float32)
-            data[sample_start_idx:sample_end_idx] = obs
-            data = self.padding(data, sample_start_idx, sample_end_idx)
+
+            data = np.zeros((self.n_obs_steps, *obs.shape[1:]), dtype=np.float32)
+            try:
+                data[sample_start_idx:] = obs
+            except ValueError:
+                print(f"ValueError at index {idx} for key {key}: data shape {data.shape}, obs shape {obs.shape}, indices {buffer_start_idx}-{buffer_end_idx}, sample indices {sample_start_idx}-{sample_end_idx}")
+                raise
+            # data[sample_start_idx:] = obs
+            data[:sample_start_idx] = obs[0]
             res['obs'][key] = data
-        for key in action_keys:
-            action = self.data[key][buffer_start_idx:buffer_end_idx]
-            action = np.array(action).astype(np.float32)
-            data = np.zeros((self.horizon, *action.shape[1:]), dtype=np.float32)
-            data[sample_start_idx:sample_end_idx] = action
-            data = self.padding(data, sample_start_idx, sample_end_idx)
-            res[key] = data
+            
+        action = self.data['action'][buffer_start_idx:buffer_end_idx]
+        action = np.array(action).astype(np.float32)
+        data = np.zeros((self.horizon, *action.shape[1:]), dtype=np.float32)
+        data[sample_start_idx:sample_end_idx] = action
+        data = self.padding(data, sample_start_idx, sample_end_idx)
+        res['action'] = data
 
-        if not self.separate_action:
-            agent_num = len(action_keys)
-            state_list = []
-            action_list = []
-            for i in range(agent_num):
-                key = f"state_{i}"
-                state_list.append(res['obs'][key])
-                del res['obs'][key]
-                key = f"action_{i}"
-                action_list.append(res[key])
-                del res[key]
-            res['obs']['state'] = np.concatenate(state_list, axis=-1)
-            res['action'] = np.concatenate(action_list, axis=-1)
-
+        if self.mask_head:
+            if not self.skip_flags[buffer_start_idx] and random.uniform(0, 1) < 0.8:
+                origin_img = res['obs']['cam_head']
+                noise = np.random.rand(*origin_img.shape).astype(np.float32)
+                weight = random.uniform(0.0, 0.5)
+                mean = self.noise_mean[None, :, None, None]
+                std = self.noise_std[None, :, None, None]
+                noise = (noise - mean) / std
+                mixed = origin_img * (1.0 - weight) + noise * weight
+                res['obs']['cam_head'] = mixed
         return res
 
 
@@ -139,21 +177,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_path", type=str, required=True, help="Path to the dataset")
     args = parser.parse_args()
-    dataset = Dataset2D(args.dataset_path, horizon=8, 
+    dataset = Dataset2D(args.dataset_path, horizon=16, n_obs_steps=3,
                         input_meta={
                             "obs": {
-                                "head_cam_0": [3, 256, 256],
-                                "head_cam_1": [3, 256, 256],
-                                "state_0": [8],
-                                "state_1": [8],
+                                "cam_left": [270, 480, 3],
+                                "cam_right": [270, 480, 3],
+                                "cam_head": [270, 480, 3],
+                                "qpos": [14],
                             },
-                            "action_0": [8],
-                            "action_1": [8],
+                            "action": [14],
                         },
-                        seperate_action=False,
+                        mask_head=True,
                         use_mem=True)
     norms = dataset.get_normalizer()
-    for i in tqdm(range(len(dataset))):
+    data = dataset[0]
+    data = dataset[-1]
+    for i in tqdm(range(0, len(dataset))):
         data = dataset[i]
         # print(data)
-        break
+        #

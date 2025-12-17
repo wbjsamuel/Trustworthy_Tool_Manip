@@ -1,0 +1,40 @@
+name: pick_cube
+
+image_shape: &image_shape [3, 224, 384]
+action_shape: &action_shape [14]
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    cam_head:
+      shape: *image_shape
+      type: rgb
+    cam_left:
+      shape: *image_shape
+      type: rgb
+    cam_right:
+      shape: *image_shape
+      type: rgb
+    qpos:
+      shape: *action_shape
+      type: low_dim
+  action:
+    shape: *action_shape
+
+dataset:
+  _target_: dataset.dataset2d.Dataset2D
+  dataset_path: data/pick_cube.h5
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}//2'}
+  input_meta: 
+    obs:
+      cam_head: *image_shape
+      cam_left: *image_shape
+      cam_right: *image_shape
+      qpos: *action_shape
+    action: *action_shape
+  mask_head: True
+  use_mem: True
+  
