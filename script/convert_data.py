@@ -2,7 +2,7 @@ from pathlib import Path
 import os
 
 tasks = [
-    ('data/tool_1215', 2),
+    ('data/screwdriver_0112', 2),
 ]
 # tasks = [
 #     ('h5_data/lift_barrier_pointcloud.h5', 2),

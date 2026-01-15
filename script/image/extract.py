@@ -1,163 +1,228 @@
-import os
-from typing import Union
+import argparse
+from pathlib import Path
 from tqdm import tqdm
+import cv2
 import h5py
 import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision.transforms.v2 as v2
 from torch.utils.data import Dataset
-import argparse
+from scipy.ndimage import gaussian_filter1d
+import matplotlib.pyplot as plt
 
-from mani_skill.utils.io_utils import load_json
-from mani_skill.utils import common
 
-# loads h5 data into memory for faster access
-def load_h5_data(data):
-    out = dict()
-    for k in data.keys():
-        if isinstance(data[k], h5py.Dataset):
-            out[k] = data[k][:]
-        else:
-            out[k] = load_h5_data(data[k])
-    return out
-
-class ManiSkillTrajectoryDataset(Dataset):
+def clip(seq, velocity_threshold=0.001, sigma=1.0):
     """
-    A general torch Dataset you can drop in and use immediately with just about any trajectory .h5 data generated from ManiSkill.
-    This class simply is a simple starter code to load trajectory data easily, but does not do any data transformation or anything
-    advanced. We recommend you to copy this code directly and modify it for more advanced use cases
-
+    Clip the still part of the sequence from both ends.
+    
     Args:
-        dataset_file (str): path to the .h5 file containing the data you want to load
-        load_count (int): the number of trajectories from the dataset to load into memory. If -1, will load all into memory
-        success_only (bool): whether to skip trajectories that are not successful in the end. Default is false
-        device: The location to save data to. If None will store as numpy (the default), otherwise will move data to that device
+        seq: Action sequence representing joint angles
+        velocity_threshold: Threshold for determining if the robot is moving
+        sigma: Standard deviation for Gaussian smoothing filter
+        min_motion_duration: Minimum number of frames for valid motion segment
+    
+    Returns:
+        Clipped sequence and the start/end indices
     """
+    
+    # Calculate velocity (difference between consecutive frames)
+    velocity = np.diff(seq, axis=0)
+    
+    # Calculate the magnitude of velocity (L2 norm across joint dimensions)
+    velocity_magnitude = np.linalg.norm(velocity, axis=1)  # Shape: (T-1,)
+    
+    # Apply Gaussian smoothing to make the detection robust to noise
+    smoothed_velocity = gaussian_filter1d(velocity_magnitude, sigma=sigma)
+    
+    # Find motion segments (where smoothed velocity exceeds threshold)
+    is_moving = smoothed_velocity > velocity_threshold
+    
+    # Find the first and last indices where the robot is moving
+    moving_indices = np.where(is_moving)[0]
+    
+    start_idx = moving_indices[0]
+    end_idx = moving_indices[-1] + 1  # +1 because velocity has one less frame
+    
+    # Add small buffer to avoid cutting too aggressively
+    buffer = 3  # 5% of sequence length as buffer
+    start_idx = max(0, start_idx - buffer)
+    end_idx = min(len(seq), end_idx + buffer)
+    
+    return start_idx, end_idx
 
-    def __init__(self, dataset_file: str, load_count=-1, success_only: bool = False, device = None) -> None:
-        self.dataset_file = dataset_file
-        self.device = device
-        self.data = h5py.File(dataset_file, "r")
-        json_path = dataset_file.replace(".h5", ".json")
-        self.json_data = load_json(json_path)
-        self.episodes = self.json_data["episodes"]
-        self.env_info = self.json_data["env_info"]
-        self.env_id = self.env_info["env_id"]
-        self.env_kwargs = self.env_info["env_kwargs"]
 
-        self.obs = []
-        self.actions = []
-        self.terminated = []
-        self.truncated = []
-        self.success, self.fail, self.rewards = None, None, None
-        if load_count == -1:
-            load_count = len(self.episodes)
-
-        self.load_count = load_count
-        self.success_only = success_only
+class RealTrajectoryDataset(Dataset):
+    def __init__(self, dataset_dir: str):
+        self.dataset_dir = Path(dataset_dir)
+        self.data_files = list(self.dataset_dir.glob('*.hdf5'))
+        self.data_files.sort()
 
     def __len__(self):
-        return self.load_count
-
-    def __getitem__(self, eps_id):
-        eps = self.episodes[eps_id]
-        if self.success_only: 
-            assert "success" in eps, "episodes in this dataset do not have the success attribute, cannot load dataset with success_only=True"
-            if not eps["success"]:
-                return None
-
-        trajectory = self.data[f"traj_{eps['episode_id']}"]
-        trajectory = load_h5_data(trajectory)
-
-        eps_len = int(eps['elapsed_steps'])
-
-        # exclude the final observation as most learning workflows do not use it
-        obs = common.index_dict_array(trajectory["obs"], slice(eps_len))
-        
-        obs = obs["sensor_data"]
-        action = trajectory["actions"]
-        # terminated = trajectory["terminated"]
-        # truncated = trajectory["truncated"]
-        res = dict(
-            obs=obs,
-            action=action,
-            # terminated=terminated,
-            # truncated=truncated,
-        )
-
-        return res
+        return len(self.data_files)
     
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
+    def __getitem__(self, idx):
+        return self.extract_hdf5_data(idx)
+    
 
-    def __del__(self):
-        self.data.close()
+    def decode_per_frame_if_needed(self, v):
+        """Return frames as np.ndarray [T, H, W, C].
+        Inputs either:
+        - already-decoded array of shape [T, H, W, C]
+        - compressed buffer array of shape [T, L] uint8 (each row is one image)
+        """
+
+        arr = np.asarray(v)
+        # Already decoded
+        if arr.ndim == 4:
+            res = np.empty((arr.shape[0], 3, self.resize_size[0], self.resize_size[1]), dtype=np.float32)
+            for i in range(arr.shape[0]):
+                res[i] = self.transform(arr[i])
+            return arr
+
+        # Compressed buffers: decode each row separately
+        if arr.ndim == 2 and arr.dtype == np.uint8:
+            frames = []
+            for i in range(arr.shape[0]):
+                buf = arr[i]
+                img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                
+                frames.append(img_rgb)
+            return np.stack(frames, axis=0)
+
+        raise ValueError(f"Unsupported video tensor shape: {arr.shape}, dtype: {arr.dtype}")
 
 
-def main(dataset_path: str, output_path: str, load_num: int, agent_num: int) -> None:
-    dataset = ManiSkillTrajectoryDataset(dataset_file=dataset_path, load_count=load_num)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    def extract_hdf5_data(self, idx):
+        """
+        /action:        (525, 14)       float32
+        /action_base:   (525, 6)        float32
+        /action_eef:    (525, 14)       float32
+        /action_velocity:       (525, 4)        float32
+        /observations
+        /observations/base_velocity:    (525, 4)        float32
+        /observations/eef:      (525, 14)       float32
+        /observations/effort:   (525, 14)       float32
+        /observations/images
+        /observations/images/head:      (525, 14354)    uint8
+        /observations/images/left_wrist:        (525, 14354)    uint8
+        /observations/images/right_wrist:       (525, 14354)    uint8
+        /observations/qpos:     (525, 14)       float32
+        /observations/qvel:     (525, 14)       float32
+        /observations/robot_base:       (525, 6)        float32
+        """
+        hdf5_file = self.data_files[idx]
+        with h5py.File(hdf5_file, 'r') as f:
+            qpos = f['/observations/qpos'][()]
+            action = f['/action'][()]
+            start_idx, end_idx = clip(action, velocity_threshold=0.001)
+            print(f"Clipping episode {hdf5_file.name}: {start_idx} to {end_idx} / {len(action)}")
+            image_dict = dict()
+            for cam_name in f[f'/observations/images/'].keys():
+                image_dict[cam_name] = f[f'/observations/images/{cam_name}'][()]
+
+        return {
+            'obs': {
+                'cam_right': image_dict['right_wrist'][start_idx:end_idx],
+                'cam_left': image_dict['left_wrist'][start_idx:end_idx],
+                'cam_head': image_dict['head'][start_idx:end_idx],
+                'qpos': qpos[start_idx:end_idx]
+            },
+            'action': action[start_idx:end_idx]
+        }
+
+
+def main(dataset_dir: str, output_path: str) -> None:
+    dataset = RealTrajectoryDataset(dataset_dir)
+    device = 'cuda:0'
+
     comp_kwaegs = {'compression': 'gzip', 'compression_opts': 4}
     episode_ends = []
+    episode_idx = []
     end = 0
     with h5py.File(output_path, "w") as f:
+        f.attrs['resize'] = False
         for i, data in tqdm(enumerate(dataset), desc="Loading data", total=len(dataset)):
             obs = data["obs"]
             action = data["action"]
             if data is not None:
-                for agent_id in range(agent_num):
-                    camera_name = "head_camera_agent" + str(agent_id)
-                    if (len(action[f'panda-{agent_id}']) != len(obs[camera_name]["rgb"])):
-                        print("action length not equal to obs length")
-                        print("action length", len(action[f'panda-{agent_id}']))
-                        print("obs length", len(obs["sensor_data"][camera_name]["rgb"]))
-                    min_len = min(len(action[f'panda-{agent_id}']), len(obs[camera_name]["rgb"]))
+                cam_right = obs["cam_right"]
+                cam_left = obs["cam_left"]
+                cam_head = obs["cam_head"]
+                qpos = obs["qpos"]
 
-                    if agent_id == 0:
-                        end += min_len
-                        episode_ends.append(end)
+                ntime, dt = np.linspace(0.0, 1.0, num=action.shape[0], endpoint=True, retstep=True)
+                ntime = ntime.astype(np.float32)
+                dt = np.full((action.shape[0],), dt, dtype=np.float32)
 
-                    if i == 0:
-                        head_cam = obs[camera_name]["rgb"][:min_len]
-                        head_cam = np.array(head_cam).astype(np.uint8)
-                        f.create_dataset(
-                            f"head_cam_{agent_id}",
-                            data=head_cam,
-                            shape=head_cam.shape,
-                            maxshape=(None, *head_cam.shape[1:]),
-                            dtype="uint8",
-                            **comp_kwaegs
-                        )
-                        agent_action = action[f'panda-{agent_id}'][:min_len]
-                        agent_action = np.array(agent_action).astype(np.float32)
-                        f.create_dataset(
-                            f"action_{agent_id}",
-                            data=agent_action,
-                            shape=agent_action.shape,
-                            maxshape=(None, *agent_action.shape[1:]),
-                            dtype="float32",
-                            **comp_kwaegs
-                        )
-                    else:
-                        head_cam = obs[camera_name]["rgb"][:min_len]
-                        head_cam = np.array(head_cam).astype(np.uint8)
-                        f[f"head_cam_{agent_id}"].resize((f[f"head_cam_{agent_id}"].shape[0] + head_cam.shape[0]), axis=0)
-                        f[f"head_cam_{agent_id}"][-head_cam.shape[0]:] = head_cam
-                        agent_action = action[f'panda-{agent_id}'][:min_len]
-                        agent_action = np.array(agent_action).astype(np.float32)
-                        f[f"action_{agent_id}"].resize((f[f"action_{agent_id}"].shape[0] + agent_action.shape[0]), axis=0)
-                        f[f"action_{agent_id}"][-agent_action.shape[0]:] = agent_action
+                end += len(action)
+                episode_ends.append(end)
+                episode_idx += [(i, j) for j in range(len(action))]
+
+                group = f.create_group(f"episode_{i}")
+                group.create_dataset("cam_head", data=cam_head, dtype="uint8", **comp_kwaegs)
+                group.create_dataset("cam_left", data=cam_left, dtype="uint8", **comp_kwaegs)
+                group.create_dataset("cam_right", data=cam_right, dtype="uint8", **comp_kwaegs)
+
+                if i == 0:
+                    f.create_dataset(
+                        f"qpos",
+                        data=qpos,
+                        shape=qpos.shape,
+                        maxshape=(None, *qpos.shape[1:]),
+                        dtype="float32",
+                        **comp_kwaegs
+                    )
+                    f.create_dataset(
+                        f"action",
+                        data=action,
+                        shape=action.shape,
+                        maxshape=(None, *action.shape[1:]),
+                        dtype="float32",
+                        **comp_kwaegs
+                    )
+                    f.create_dataset(
+                        f"ntime",
+                        data=ntime,
+                        shape=ntime.shape,
+                        maxshape=(None,),
+                        dtype="float32",
+                        **comp_kwaegs
+                    )
+                    f.create_dataset(
+                        f"dt",
+                        data=dt,
+                        shape=dt.shape,
+                        maxshape=(None,),
+                        dtype="float32",
+                        **comp_kwaegs
+                    )
+                else:
+                    f["qpos"].resize((f["qpos"].shape[0] + qpos.shape[0]), axis=0)
+                    f["qpos"][-qpos.shape[0]:] = qpos
+                    f["action"].resize((f["action"].shape[0] + action.shape[0]), axis=0)
+                    f["action"][-action.shape[0]:] = action
+                    f["ntime"].resize((f["ntime"].shape[0] + ntime.shape[0]), axis=0)
+                    f["ntime"][-ntime.shape[0]:] = ntime
+                    f["dt"].resize((f["dt"].shape[0] + dt.shape[0]), axis=0)
+                    f["dt"][-dt.shape[0]:] = dt
+
         f.create_dataset(
             "episode_ends",
             data=np.array(episode_ends),
             **comp_kwaegs
         )
+        f.create_dataset(
+            "episode_idx",
+            data=np.array(episode_idx),
+            **comp_kwaegs
+        )
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_path", type=str, required=True, help="Path to the dataset")
+    parser.add_argument("--dataset_dir", type=str, required=True, help="Path to the dataset")
     parser.add_argument("--output_path", type=str, required=True, help="Path to save the output")
-    parser.add_argument("--agent_num", type=int, default=4, help="Number of agents (default: 4)")
-    parser.add_argument("--load_num", type=int, default=-1, help="Number of trajectories to load")
     args = parser.parse_args()
 
-    main(args.dataset_path, args.output_path, args.load_num, args.agent_num)
+    main(args.dataset_dir, args.output_path)
