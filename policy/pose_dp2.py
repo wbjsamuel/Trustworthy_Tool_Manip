@@ -81,6 +81,13 @@ class DP2PoseEstimator(BasePolicy):
         if num_inference_steps is None:
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
+        
+        # define pose estimator
+        self.pose_estimator = PoseEstimator(
+            shape_meta=shape_meta,
+            optimazer_cfg=optimazer_cfg,
+            scheduler_cfg=scheduler_cfg
+        )
     
     # ========= inference  ============
     def conditional_sample(self, 
