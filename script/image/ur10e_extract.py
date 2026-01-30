@@ -89,12 +89,12 @@ def main(dataset_dir: str, output_path: str) -> None:
         for i, data in tqdm(enumerate(dataset), desc="Processing", total=len(dataset)):
             obs = data["obs"]
             action = data["action"]
-            rgb = obs["cam_rgb"]
+            rgb = obs["cam_front"]
             qpos = obs["qpos"]
 
             # Save Episode Group (for visualization/debugging)
             ep_group = f.create_group(f"episode_{i}")
-            ep_group.create_dataset("rgb", data=rgb, dtype="uint8", chunks=True, **comp_kwargs)
+            ep_group.create_dataset("cam_front", data=rgb, dtype="uint8", chunks=True, **comp_kwargs)
             ep_group.create_dataset("qpos", data=qpos, dtype="float32", **comp_kwargs)
             ep_group.create_dataset("action", data=action, dtype="float32", **comp_kwargs)
 

@@ -27,6 +27,6 @@ dataset:
       cam_front: *image_shape
       qpos: *action_shape
     action: *action_shape
-  mask_head: True
+  mask_head: False
   use_mem: True
   

@@ -103,23 +103,47 @@ class Dataset2D(Dataset):
         return normalizer
     
     def decode_per_frame_if_needed(self, v):
-        """Return frames as np.ndarray [T, H, W, C].
-        Inputs either:
-        - already-decoded array of shape [T, H, W, C]
-        - compressed buffer array of shape [T, L] uint8 (each row is one image)
+        """Return frames as torch.Tensor [T, C, H, W] or [T, H, W, C] depending on transform.
+        Accepts either:
+        - already-decoded: np.ndarray shape [T, H, W, C]  (usually uint8 or float32)
+        - compressed:     np.ndarray shape [T, L]        (uint8, each row = encoded image bytes)
         """
-
         arr = np.asarray(v)
 
-        # Compressed buffers: decode each row separately
-        frames = []
-        for i in range(arr.shape[0]):
-            buf = arr[i]
-            img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            img = self.transform(img_rgb)
-            frames.append(img)
-        return torch.stack(frames, axis=0)
+        if arr.ndim == 4:
+            # Already decoded: [T, H, W, C]
+            frames = []
+            for i in range(arr.shape[0]):
+                img_bgr = arr[i]                     # assume it's already RGB or we'll convert
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                img = self.transform(img_rgb)
+                frames.append(img)
+            return torch.stack(frames, dim=0)
+
+        elif arr.ndim == 2 and arr.dtype == np.uint8:
+            # Compressed buffers: [T, L]
+            frames = []
+            for i in range(arr.shape[0]):
+                buf = arr[i]
+                if len(buf) == 0:
+                    # You may want to skip / raise / use placeholder
+                    raise ValueError(f"Empty buffer at frame {i}")
+
+                img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if img_bgr is None:
+                    raise ValueError(f"Failed to decode frame {i} (corrupted or invalid image data)")
+
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                img = self.transform(img_rgb)
+                frames.append(img)
+
+            return torch.stack(frames, dim=0)
+
+        else:
+            raise ValueError(
+                f"Unsupported input shape/dtype: {arr.shape} {arr.dtype}\n"
+                "Expected either [T, H, W, C] or [T, L] uint8"
+            )
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
@@ -137,6 +161,7 @@ class Dataset2D(Dataset):
                 else:
                     raise NotImplementedError("Cross-episode sampling is not implemented yet.")
                 obs = self.decode_per_frame_if_needed(images).numpy()
+                # obs = images
             else:
                 obs = self.data[key][start_idx:end_idx]
                 obs = np.array(obs).astype(np.float32)
