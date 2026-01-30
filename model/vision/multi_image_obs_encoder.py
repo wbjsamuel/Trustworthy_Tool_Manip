@@ -167,7 +167,7 @@ class MultiImageObsEncoder(nn.Module):
                 else:
                     assert batch_size == img.shape[0]
                 # pdb.set_trace()
-                assert img.shape[1:] == self.key_shape_map[key]
+                assert img.shape[1:] == self.key_shape_map[key], f"Set input image shape as {self.key_shape_map[key]}, but get image in {img.shape[1:]}"
                 img = self.key_transform_map[key](img)
                 feature = self.key_model_map[key](img)
                 features.append(feature)
