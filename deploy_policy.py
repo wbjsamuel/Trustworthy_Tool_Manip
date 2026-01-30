@@ -1,143 +1,123 @@
-from lightning import LightningModule
-import numpy as np
-from omegaconf import OmegaConf
+import os
 import torch
-import hydra
 import dill
+import hydra
+import numpy as np
 from collections import deque
 from typing import Any, Dict
+from omegaconf import OmegaConf
+from lightning import LightningModule
 from common.pytorch_util import dict_apply
 
 class DeployPolicy:
-    """
-    DeployPolicy provides a minimal interface for loading and running a trained policy with history support.
-    Usage:
-        policy = DeployPolicy(ckpt_path)
-        policy.update_obs(obs)
-        action = policy.get_action()
-        policy.reset()
-    """
     def __init__(self, ckpt_path: str):
         """
-        Initialize and load the policy from checkpoint. Automatically detects history length.
-        Args:
-            ckpt_path (str): Path to the checkpoint file.
+        Loads cfg from the .hydra folder located in the checkpoint's parent directory.
         """
-        payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
-        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-        cfg = payload['cfg']
-        print(cfg)
+        # 1. Resolve Paths
+        # Expected: outputs/DP2-DINO/RUN_ID/checkpoints/last.ckpt
+        # .hydra is at: outputs/DP2-DINO/RUN_ID/.hydra/
+        ckpt_dir = os.path.dirname(ckpt_path)
+        run_root = os.path.dirname(ckpt_dir)
+        hydra_cfg_path = os.path.join(run_root, '.hydra', 'config.yaml')
+        
+        if not os.path.exists(hydra_cfg_path):
+            raise FileNotFoundError(f"Could not find Hydra config at {hydra_cfg_path}")
 
-        # self.policy = policy
-        cfg = OmegaConf.create(cfg)
+        print(f"[*] Loading config from: {hydra_cfg_path}")
+        cfg = OmegaConf.load(hydra_cfg_path)
+
+        # 2. Load Checkpoint Payload
+        print(f"[*] Loading weights from: {ckpt_path}")
+        # Using dill because Diffusion Policy often pickles complex objects
+        payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
+        
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+        # 3. Instantiate Model via Hydra
+        # hydra.utils.instantiate uses the '_target_' field in your config.yaml
+        print("[*] Instantiating policy model...")
         model: LightningModule = hydra.utils.instantiate(cfg.policy)
+        
+        # 4. Load State Dict
+        # Lightning checkpoints usually wrap the model in 'state_dict'
         model.load_state_dict(payload['state_dict'])
-        self.policy = model
-        self.policy.to(self.device)
+        self.policy = model.to(self.device)
         self.policy.eval()
         
-        # Read history length from config (n_obs_steps or horizon)
-        self.n_obs_steps = getattr(cfg, 'n_obs_steps', None)
+        # 5. Set Parameters from Config
+        self.n_obs_steps = cfg.n_obs_steps if hasattr(cfg, 'n_obs_steps') else 2
+        print(f"[+] Model Ready. Device: {self.device} | History: {self.n_obs_steps}")
         
-        self.obs = deque(maxlen=self.n_obs_steps+1)
-        self.action = deque(maxlen=8)
+        # Buffers
+        self.obs_deque = deque(maxlen=self.n_obs_steps)
+        self.action_deque = deque(maxlen=8)
 
     def get_model_input(self, observation, agent_pos, agent_num):
+        """Processes raw socket data into model-ready tensors."""
         head_cam_dict = {}
         agent_pos_list = []
+        
         for agent_id in range(agent_num):
-            camera_name = 'head_camera' + '_agent' + str(agent_id)
-            head_cam = np.moveaxis(observation['sensor_data'][camera_name]['rgb'].squeeze(0).cpu().numpy(), -1, 0) / 255   
-            head_cam_dict.update({f'head_cam_{agent_id}': head_cam})
-            agent_pos_i = agent_pos[agent_id * 8 : (agent_id + 1) * 8]
-            agent_pos_list.append(agent_pos_i)
-        head_cam_dict.update({f'agent_pos': np.concatenate(agent_pos_list, axis=-1)})
+            # RGB normalization and axis swap (HWC -> CHW)
+            camera_key = f'head_camera_agent{agent_id}'
+            rgb = observation['sensor_data'][camera_key]['rgb']
+            
+            if torch.is_tensor(rgb):
+                rgb = rgb.cpu().numpy()
+            
+            # Normalize to [0, 1] as expected by DINO/ViT backbones
+            head_cam = rgb.squeeze().astype(np.float32) / 255.0
+            head_cam = np.moveaxis(head_cam, -1, 0) 
+            head_cam_dict[f'head_cam_{agent_id}'] = head_cam
+            
+            # Agent state (Joints + Gripper)
+            pos_i = agent_pos[agent_id * 8 : (agent_id + 1) * 8]
+            agent_pos_list.append(pos_i)
+            
+        head_cam_dict['agent_pos'] = np.concatenate(agent_pos_list, axis=-1).astype(np.float32)
         return head_cam_dict
 
     def update_obs(self, obs: Dict[str, Any]):
-        initial_qpos_list = []
+        """Updates the history buffer with new data from the ROS client."""
         agent_num = len(obs['agent'])
-        for id in range(agent_num):
-            current_qpos = obs['agent'][f'panda-{id}']['qpos'].squeeze(0)[:-2].cpu().numpy()
-            if len(self.action) == 0:
-                # 如果action队列为空,则使用qpos最后一位为1
-                current_qpos = np.append(current_qpos, 1)
-            else:
-                current_action = self.action.pop()
-                current_qpos = np.append(current_qpos, current_action[id * 8 : (id + 1) * 8])
-            initial_qpos_list.append(current_qpos)
-        initial_qpos_all = np.concatenate(initial_qpos_list)  # shape: [n*8]
-        obs = self.get_model_input(obs, initial_qpos_all, agent_num)
-        self.obs.append(obs)
-
-    def get_action(self) -> Any:
-        device, dtype = self.policy.device, self.policy.dtype
-        obs = self.get_n_steps_obs() #
-
-        # create obs dict
-        np_obs_dict = dict(obs)
-        # device transfer
-        obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).to(device=device))
-        # run policy
-        with torch.no_grad():
-            obs_dict_input = {}  # flush unused keys
-            for key in obs_dict.keys():
-                if key.startswith('head_cam') or key.startswith('agent_pos'):          
-                    obs_dict_input[key] = obs_dict[key].unsqueeze(0)
-            # import pdb; pdb.set_trace()
-            action_dict = self.policy.predict_action(obs_dict_input)
-
-        # device_transfer
-        np_action_dict = dict_apply(action_dict, lambda x: x.detach().to('cpu').numpy())
-        action_pred_list = []
-        for key in np_action_dict.keys():
-            if key.startswith('action_pred'):
-                action_pred_list.append(np_action_dict[key])
-        if action_pred_list:
-            merged_action_pred = np.concatenate(action_pred_list, axis=-1)  # 或 axis=1, 视你的数据shape而定
-            action = merged_action_pred.squeeze(0)
-        else:
-            action = np_action_dict['action'].squeeze(0)
+        initial_qpos_list = []
         
-        return action
+        for i in range(agent_num):
+            qpos = obs['agent'][f'panda-{i}']['qpos']
+            if torch.is_tensor(qpos):
+                qpos = qpos.cpu().numpy()
+            qpos = qpos.flatten()
+            
+            # If no actions taken yet, assume gripper is open (1.0)
+            # otherwise use the last commanded gripper state
+            gripper_state = 1.0 if len(self.action_deque) == 0 else self.action_deque[-1][i * 8 + 7]
+            current_qpos = np.append(qpos[:7], gripper_state)
+            initial_qpos_list.append(current_qpos)
 
-    def reset(self):
-        """
-        Reset the policy and history at the beginning of each episode.
-        """
-        self.obs = deque(maxlen=self.n_obs_steps+1)
-    
-    def get_n_steps_obs(self):
-        assert(len(self.obs) > 0), 'no observation is recorded, please update obs first'
+        combined_qpos = np.concatenate(initial_qpos_list)
+        formatted_obs = self.get_model_input(obs, combined_qpos, agent_num)
+        self.obs_deque.append(formatted_obs)
 
-        result = dict()
-        for key in self.obs[0].keys():
-            result[key] = self.stack_last_n_obs(
-                [obs[key] for obs in self.obs],
-                self.n_obs_steps
-            )
+    def get_action(self) -> np.ndarray:
+        """Runs inference on the accumulated history."""
+        # Ensure we have enough history to run the model
+        if len(self.obs_deque) < self.n_obs_steps:
+            while len(self.obs_deque) < self.n_obs_steps:
+                self.obs_deque.appendleft(self.obs_deque[0])
 
-        return result
+        # Batch and move to GPU
+        batch_obs = {}
+        for key in self.obs_deque[0].keys():
+            batch_obs[key] = np.stack([x[key] for x in self.obs_deque])
 
-    def stack_last_n_obs(self, all_obs, n_steps):
-        assert(len(all_obs) > 0)
-        all_obs = list(all_obs)
-        if isinstance(all_obs[0], np.ndarray):
-            result = np.zeros((n_steps,) + all_obs[-1].shape, 
-                dtype=all_obs[-1].dtype)
-            start_idx = -min(n_steps, len(all_obs))
-            result[start_idx:] = np.array(all_obs[start_idx:])
-            if n_steps > len(all_obs):
-                # pad
-                result[:start_idx] = result[start_idx]
-        elif isinstance(all_obs[0], torch.Tensor):
-            result = torch.zeros((n_steps,) + all_obs[-1].shape, 
-                dtype=all_obs[-1].dtype)
-            start_idx = -min(n_steps, len(all_obs))
-            result[start_idx:] = torch.stack(all_obs[start_idx:])
-            if n_steps > len(all_obs):
-                # pad
-                result[:start_idx] = result[start_idx]
-        else:
-            raise RuntimeError(f'Unsupported obs type {type(all_obs[0])}')
-        return result
+        device_obs = dict_apply(batch_obs, lambda x: torch.from_numpy(x).to(self.device).unsqueeze(0))
+
+        with torch.no_grad():
+            result = self.policy.predict_action(device_obs)
+            # Handle different return keys based on DP2 version
+            action_key = 'action_pred' if 'action_pred' in result else 'action'
+            action_np = result[action_key].detach().cpu().numpy()[0, 0]
+            
+        self.action_deque.append(action_np)
+        return action_np
