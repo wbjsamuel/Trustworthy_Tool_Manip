@@ -44,12 +44,13 @@ class DP2InferenceEngine:
         self.model.load_state_dict(payload['state_dict'])
         self.model.to(self.device).eval()
         
-        print("Starting GPU warmup...")
+        print("Starting GPU warmup with T=3 history...")
         self.warmup()
         print("RTX 5090 is hot and ready.")
 
     @torch.no_grad()
     def warmup(self):
+        # Shape: [Batch=1, Time=3, Channels=3, H=224, W=384]
         dummy_rgb = torch.randn(1, 3, 3, 224, 384).to(self.device)
         dummy_qpos = torch.randn(1, 3, 7).to(self.device)
         obs = {'cam_front': dummy_rgb, 'qpos': dummy_qpos}
@@ -58,23 +59,35 @@ class DP2InferenceEngine:
         torch.cuda.synchronize()
 
     @torch.no_grad()
-    def infer(self, img, arm_joints, gripper_state):
+    def infer(self, obs_dict):
+        """
+        obs_dict contains:
+        - 'cam_front': List of 3 CV2 images
+        - 'qpos': List of 3 joint+gripper arrays
+        """
         t0 = time.perf_counter()
         
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img_resized = cv2.resize(img_rgb, (224, 224))
-        img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-        img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+        # 1. Process Images: [T, C, H, W]
+        img_tensors = []
+        for img in obs_dict['cam_front']:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_res = cv2.resize(img_rgb, (384, 224)) # Width, Height matching warmup
+            img_t = torch.from_numpy(img_res).permute(2, 0, 1).float() / 255.0
+            img_tensors.append(img_t)
         
-        qpos = np.concatenate([arm_joints, gripper_state], axis=-1)
-        qpos_tensor = torch.from_numpy(qpos).float().unsqueeze(0).unsqueeze(0).to(self.device)
+        # Stack to [1, 3, 3, 224, 384]
+        combined_img = torch.stack(img_tensors).unsqueeze(0).to(self.device)
+        
+        # 2. Process Qpos: [1, 3, 7]
+        combined_qpos = torch.from_numpy(np.array(obs_dict['qpos'])).float().unsqueeze(0).to(self.device)
 
-        obs = {'cam_front': img_tensor, 'qpos': qpos_tensor}
+        obs = {'cam_front': combined_img, 'qpos': combined_qpos}
         action_dict = self.model.predict_action(obs)
         
         dt = (time.perf_counter() - t0) * 1000
-        print(f"GPU Compute: {dt:.2f}ms") # 5090 should be very low here
+        print(f"GPU Compute (T=3): {dt:.2f}ms")
         
+        # Return first action in the horizon
         return action_dict[0, 0, :].cpu().numpy().tolist()
 
 def main():
@@ -93,21 +106,29 @@ def main():
         try:
             while True:
                 while len(buffer) < header_struct.size:
-                    chunk = conn.recv(16384)
+                    chunk = conn.recv(32768) # Increased for multi-image payload
                     if not chunk: raise ConnectionError
                     buffer += chunk
                 msg_size = header_struct.unpack(buffer[:header_struct.size])[0]
                 buffer = buffer[header_struct.size:]
                 while len(buffer) < msg_size:
-                    chunk = conn.recv(16384)
+                    chunk = conn.recv(32768)
                     if not chunk: raise ConnectionError
                     buffer += chunk
                 
+                # Unpack the history observations
                 data = pickle.loads(buffer[:msg_size])
                 buffer = buffer[msg_size:]
                 
-                img = cv2.imdecode(data['img'], cv2.IMREAD_COLOR)
-                action = engine.infer(img, data['arm_joints'], data['gripper_state'])
+                # Decode all images in the history list
+                decoded_imgs = [cv2.imdecode(img_buf, cv2.IMREAD_COLOR) for img_buf in data['img_history']]
+                
+                obs_payload = {
+                    'cam_front': decoded_imgs,
+                    'qpos': data['qpos_history']
+                }
+                
+                action = engine.infer(obs_payload)
                 
                 resp = pickle.dumps(action)
                 conn.sendall(header_struct.pack(len(resp)) + resp)
