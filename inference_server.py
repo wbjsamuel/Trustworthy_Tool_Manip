@@ -50,9 +50,9 @@ class DP2InferenceEngine:
 
     @torch.no_grad()
     def warmup(self):
-        dummy_rgb = torch.randn(1, 1, 3, 224, 224).to(self.device)
-        dummy_qpos = torch.randn(1, 1, 7).to(self.device)
-        obs = {'rgb': dummy_rgb, 'qpos': dummy_qpos}
+        dummy_rgb = torch.randn(1, 3, 3, 224, 384).to(self.device)
+        dummy_qpos = torch.randn(1, 3, 7).to(self.device)
+        obs = {'cam_front': dummy_rgb, 'qpos': dummy_qpos}
         for _ in range(5):
             _ = self.model.predict_action(obs)
         torch.cuda.synchronize()
@@ -69,7 +69,7 @@ class DP2InferenceEngine:
         qpos = np.concatenate([arm_joints, gripper_state], axis=-1)
         qpos_tensor = torch.from_numpy(qpos).float().unsqueeze(0).unsqueeze(0).to(self.device)
 
-        obs = {'rgb': img_tensor, 'qpos': qpos_tensor}
+        obs = {'cam_front': img_tensor, 'qpos': qpos_tensor}
         action_dict = self.model.predict_action(obs)
         
         dt = (time.perf_counter() - t0) * 1000
