@@ -24,12 +24,11 @@ class DP2InferenceEngine:
         self.model.load_state_dict(payload['state_dict'])
         self.model.to(self.device).eval()
         
-        print("--- RTX 5090 Warmup Phase ---")
+        print("--- RTX 5090: Warming Up ---")
         self.warmup()
 
     @torch.no_grad()
     def warmup(self):
-        # Matching [B=1, T=3, C=3, H=224, W=384]
         d_rgb = torch.randn(1, 3, 3, 224, 384).to(self.device)
         d_qpos = torch.randn(1, 3, 7).to(self.device)
         for _ in range(5): 
@@ -38,9 +37,7 @@ class DP2InferenceEngine:
 
     @torch.no_grad()
     def infer(self, obs_dict):
-        t0 = time.perf_counter()
         try:
-            # Match collection: Resize to 384x224
             img_tensors = [torch.from_numpy(cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), (384, 224))).permute(2, 0, 1).float() / 255.0 for img in obs_dict['cam_front']]
             rgb = torch.stack(img_tensors).unsqueeze(0).to(self.device)
             qpos = torch.from_numpy(np.array(obs_dict['qpos'])).float().unsqueeze(0).to(self.device)
@@ -49,12 +46,7 @@ class DP2InferenceEngine:
             torch.cuda.synchronize() 
             
             actions = out['action'] if isinstance(out, dict) else out
-            # Handle potential sequence output
-            res_action = actions[0, 0, :].cpu().numpy().tolist() if len(actions.shape) == 3 else actions[0, :].cpu().numpy().tolist()
-            
-            dt = (time.perf_counter() - t0) * 1000
-            if dt > 33.3: print(f"⚠️ 30Hz Constraint Violated: {dt:.1f}ms")
-            return res_action
+            return actions[0, 0, :].cpu().numpy().tolist() if len(actions.shape) == 3 else actions[0, :].cpu().numpy().tolist()
         except Exception as e:
             print(f"Inference Error: {e}")
             return None
@@ -62,7 +54,6 @@ class DP2InferenceEngine:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
-    parser.add_argument("--hz", type=int, default=30)
     args = parser.parse_args()
     
     engine = DP2InferenceEngine(args.ckpt)
@@ -71,13 +62,13 @@ def main():
     server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     server.bind(('0.0.0.0', 9999))
     server.listen(1)
-    print(f"Server Ready | Target: {args.hz}Hz")
+    print(f"Server Online. Port: 9999")
 
     header_struct = struct.Struct("Q")
     while True:
         conn, addr = server.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        print(f"Client Connected: {addr}")
+        print(f"Inference Active: {addr}")
         buffer = b""
         try:
             while True:
@@ -90,10 +81,7 @@ def main():
                 while len(buffer) < msg_size: buffer += conn.recv(65536)
                 data = pickle.loads(buffer[:msg_size]); buffer = buffer[msg_size:]
 
-                obs = {
-                    'cam_front': [cv2.imdecode(i, 1) for i in data['img_history']], 
-                    'qpos': data['qpos_history']
-                }
+                obs = {'cam_front': [cv2.imdecode(i, 1) for i in data['img_history']], 'qpos': data['qpos_history']}
                 action = engine.infer(obs)
                 if action is None: break 
                 
