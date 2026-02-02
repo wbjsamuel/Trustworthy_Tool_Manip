@@ -7,9 +7,13 @@ import numpy as np
 import argparse
 from pathlib import Path
 from omegaconf import OmegaConf
+from lightning import LightningModule
+import dill
+import hydra
 
 # Explicit imports from the repository structure
-from policy.dp2 import DP2
+from policy.dp2_dino import DP2
+OmegaConf.register_new_resolver("eval", eval)           # ← simple version (uses built-in eval)
 
 def get_args():
     parser = argparse.ArgumentParser(description="DP2 Inference Server (RTX 5090)")
@@ -28,22 +32,24 @@ class DP2InferenceEngine:
         if not config_path.exists():
             config_path = ckpt_path.parents[1] / ".hydra" / "config.yaml"
         
+        payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        
         self.cfg = OmegaConf.load(config_path)
         print(f"Loaded config from: {config_path}")
-
+        
         # 2. Initialize Model from dp2.py
         # DP2 in this repo usually takes (cfg, dataset_stats)
         # Here we load via Lightning's load_from_checkpoint
-        self.model = DP2.load_from_checkpoint(
-            str(ckpt_path), 
-            cfg=self.cfg, 
-            map_location=self.device
-        )
+        model: LightningModule = hydra.utils.instantiate(self.cfg.policy)
+        model.load_state_dict(payload['state_dict'])
+        
+        self.model = model
         self.model.to(self.device)
         self.model.eval()
         
         # Determine observation horizon (default to 1 if not in config)
-        self.horizon = self.cfg.model.get('n_obs_steps', 1)
+        self.horizon = self.cfg.get('n_obs_steps', 1)
         print(f"Model initialized. Observation horizon: {self.horizon}")
 
     @torch.no_grad()
@@ -67,13 +73,13 @@ class DP2InferenceEngine:
 
         obs = {
             'rgb': img_tensor,
-            'joint_pos': joint_tensor
+            'qpos': joint_tensor
         }
 
         # The 'predict_action' or forward call in DP2
         # Note: Depending on your exact version, you might use self.model(obs) 
         # or a specific inference method provided in the class.
-        action_dict = self.model(obs)
+        action_dict = self.model.predict_action(obs)
         
         # DP2 returns a sequence. We take the first action [B, T, D] -> [D]
         # Adjust index based on whether your model outputs normalized or raw actions
