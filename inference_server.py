@@ -13,7 +13,10 @@ import hydra
 
 # Explicit imports from the repository structure
 from policy.dp2_dino import DP2
-OmegaConf.register_new_resolver("eval", eval)           # ← simple version (uses built-in eval)
+
+# Register the eval resolver for OmegaConf as required by the config
+if not OmegaConf.has_resolver("eval"):
+    OmegaConf.register_new_resolver("eval", eval)
 
 def get_args():
     parser = argparse.ArgumentParser(description="DP2 Inference Server (RTX 5090)")
@@ -24,65 +27,80 @@ def get_args():
 
 class DP2InferenceEngine:
     def __init__(self, ckpt_path):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # 1. Load Config (Assumes config.yaml is in the same dir as the ckpt)
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         ckpt_path = Path(ckpt_path)
+        
+        # 1. Path resolution for Hydra config
         config_path = ckpt_path.parent / ".hydra" / "config.yaml"
         if not config_path.exists():
             config_path = ckpt_path.parents[1] / ".hydra" / "config.yaml"
         
-        payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
-        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-        
+        if not config_path.exists():
+            raise FileNotFoundError(f"Could not find config.yaml at {config_path}")
+
         self.cfg = OmegaConf.load(config_path)
         print(f"Loaded config from: {config_path}")
+
+        # 2. Load Checkpoint using dill
+        print(f"Loading checkpoint from {ckpt_path}...")
+        with open(ckpt_path, 'rb') as f:
+            payload = torch.load(f, pickle_module=dill, map_location=self.device)
         
-        # 2. Initialize Model from dp2.py
-        # DP2 in this repo usually takes (cfg, dataset_stats)
-        # Here we load via Lightning's load_from_checkpoint
-        model: LightningModule = hydra.utils.instantiate(self.cfg.policy)
-        model.load_state_dict(payload['state_dict'])
+        # 3. Instantiate Model via Hydra
+        self.model: LightningModule = hydra.utils.instantiate(self.cfg.policy)
         
-        self.model = model
+        # Load state dict and prepare for inference
+        self.model.load_state_dict(payload['state_dict'])
         self.model.to(self.device)
         self.model.eval()
         
-        # Determine observation horizon (default to 1 if not in config)
         self.horizon = self.cfg.get('n_obs_steps', 1)
         print(f"Model initialized. Observation horizon: {self.horizon}")
 
+        # --- 4. RTX 5090 Warmup Phase ---
+        print("Starting GPU warmup (CUDA kernel pre-loading)...")
+        self.warmup()
+        print("Warmup complete. GPU is ready for low-latency inference.")
+
     @torch.no_grad()
-    def infer(self, img, joints):
-        """
-        DP2 expects:
-        - rgb: [B, T, C, H, W]
-        - joint_pos: [B, T, D]
-        """
-        # Image Preprocessing (BGR to RGB and Resize to 224x224)
+    def warmup(self):
+        """Runs a dummy inference pass to initialize CUDA kernels."""
+        # Create dummy tensors matching expected shapes
+        # Assuming 224x224 RGB and 7-DoF QPOS
+        dummy_rgb = torch.randn(1, 1, 3, 224, 224).to(self.device)
+        dummy_qpos = torch.randn(1, 1, 7).to(self.device)
+        
+        obs = {
+            'rgb': dummy_rgb,
+            'qpos': dummy_qpos
+        }
+        
+        # Run three passes to ensure the scheduler and Dino backbones are fully cached
+        for _ in range(3):
+            _ = self.model.predict_action(obs)
+        torch.cuda.synchronize()
+
+    @torch.no_grad()
+    def infer(self, img, arm_joints, gripper_state):
+        # Image Preprocessing
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img_resized = cv2.resize(img_rgb, (224, 224))
         img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-        
-        # Add Batch and Time dimensions: [1, 1, 3, 224, 224]
         img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
         
-        # Joints Preprocessing: [1, 1, 7]
-        joint_tensor = torch.from_numpy(np.array(joints)).float()
-        joint_tensor = joint_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+        # QPOS Construction
+        qpos = np.concatenate([arm_joints, gripper_state], axis=-1)
+        qpos_tensor = torch.from_numpy(qpos).float().unsqueeze(0).unsqueeze(0).to(self.device)
 
         obs = {
             'rgb': img_tensor,
-            'qpos': joint_tensor
+            'qpos': qpos_tensor
         }
 
-        # The 'predict_action' or forward call in DP2
-        # Note: Depending on your exact version, you might use self.model(obs) 
-        # or a specific inference method provided in the class.
+        # DP2 Inference
         action_dict = self.model.predict_action(obs)
         
-        # DP2 returns a sequence. We take the first action [B, T, D] -> [D]
-        # Adjust index based on whether your model outputs normalized or raw actions
+        # Extract first action [B, T, D] -> [D]
         action = action_dict[0, 0, :].cpu().numpy().tolist()
         return action
 
@@ -95,20 +113,19 @@ def main():
     server.bind((args.host, args.port))
     server.listen(1)
     
-    print(f"RTX 5090 Server listening on {args.port}...")
-
-    header_struct = struct.Struct("Q") # 8-byte unsigned long long
+    print(f"RTX 5090 Server listening on {args.host}:{args.port}...")
+    header_struct = struct.Struct("Q")
 
     while True:
         conn, addr = server.accept()
-        print(f"Client connected: {addr}")
+        print(f"Robot connected: {addr}")
         buffer = b""
         
         try:
             while True:
-                # Read header
+                # 1. Read size header
                 while len(buffer) < header_struct.size:
-                    chunk = conn.recv(8192)
+                    chunk = conn.recv(16384)
                     if not chunk: raise ConnectionError
                     buffer += chunk
                 
@@ -116,27 +133,28 @@ def main():
                 buffer = buffer[header_struct.size:]
                 msg_size = header_struct.unpack(packed_size)[0]
 
-                # Read payload
+                # 2. Read message body
                 while len(buffer) < msg_size:
-                    chunk = conn.recv(8192)
+                    chunk = conn.recv(16384)
                     if not chunk: raise ConnectionError
                     buffer += chunk
                 
                 payload = buffer[:msg_size]
                 buffer = buffer[msg_size:]
                 
+                # 3. Unpack and Infer
                 data = pickle.loads(payload)
                 img = cv2.imdecode(data['img'], cv2.IMREAD_COLOR)
                 
-                # Perform DP2 Inference
-                action = engine.infer(img, data['joints'])
+                # Inference using separate joint and gripper lists from client
+                action = engine.infer(img, data['arm_joints'], data['gripper_state'])
                 
-                # Return result
+                # 4. Return result
                 resp_payload = pickle.dumps(action)
                 conn.sendall(header_struct.pack(len(resp_payload)) + resp_payload)
                 
-        except (ConnectionError, EOFError):
-            print("Client disconnected.")
+        except (ConnectionError, EOFError, socket.error):
+            print(f"Robot {addr} disconnected.")
         finally:
             conn.close()
 
