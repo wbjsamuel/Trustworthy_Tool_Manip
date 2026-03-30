@@ -19,3 +19,8 @@ tqdm
 wandb
 hydra-core
 prefetch_generator
+transformers
+timm
+accelerate
+sentencepiece
+torch

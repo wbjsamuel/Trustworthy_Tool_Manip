@@ -1,0 +1,25 @@
+# Configuration for Stage 1 Transformer Model
+
+data:
+  path: data/stage1_data/parsed_taco_data.pkl
+
+model:
+  embed_dim: 512
+  num_heads: 8
+  num_layers: 6
+  image_feature_dim: 1536 # DINOv2 (768) + SigLIP (768)
+  language_feature_dim: 768 # T5-base
+  pose_dim: 7
+
+training:
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.0001
+
+logging:
+  project: "trustworthy_tool_manip"
+  run_name: "stage1_transformer_training"
+  
+# Checkpoint for inference
+inference:
+  checkpoint_path: "checkpoints/last.ckpt" # Update this path to your saved checkpoint
