@@ -15,7 +15,8 @@ def main():
     # DataModule
     dm = Stage1DataModule(
         data_path=config['data']['path'], 
-        batch_size=config['training']['batch_size']
+        batch_size=config['training']['batch_size'],
+        num_workers=config['training'].get('num_workers', 4)
     )
 
     # Model
@@ -49,37 +50,37 @@ if __name__ == '__main__':
     if not os.path.exists("stage1/config/stage1.yaml"):
         os.makedirs("stage1/config", exist_ok=True)
         dummy_config = {
-            'data': {'path': 'data/stage1_data/parsed_taco_data.pkl'},
+            'data': {'path': 'data/stage1_data/parsed_taco_data'},
             'model': {'embed_dim': 512, 'num_heads': 8, 'num_layers': 6},
-            'training': {'batch_size': 2, 'epochs': 2, 'learning_rate': 1e-4},
+            'training': {'batch_size': 2, 'epochs': 2, 'learning_rate': 1e-4, 'num_workers': 0},
             'logging': {'project': 'trustworthy_tool_manip', 'run_name': 'stage1_test_run'}
         }
         with open("stage1/config/stage1.yaml", "w") as f:
             yaml.dump(dummy_config, f)
     
-    # Create dummy pickle file if it doesn't exist
+    # Create dummy data files if they don't exist
     import pickle
     import numpy as np
     from PIL import Image
 
-    pickle_path = "data/stage1_data/parsed_taco_data.pkl"
-    if not os.path.exists(pickle_path):
-        dummy_data = []
-        data_dir = "data/stage1_data/parsed_taco_data/episode_001"
-        os.makedirs(data_dir, exist_ok=True)
-        image_path = os.path.join(data_dir, "image_000.png")
-        Image.new('RGB', (224, 224)).save(image_path)
+    dummy_data_dir = "data/stage1_data/parsed_taco_data/dummy_task/seq_0"
+    os.makedirs(os.path.join(dummy_data_dir, "rgb"), exist_ok=True)
 
-        episode_data = {
-            'images': [image_path],
-            'tool_poses': np.random.rand(5, 7),
-            'instruction': 'pick up the tool',
-            'target_pose': np.random.rand(7)
-        }
-        dummy_data.append(episode_data)
-        
-        os.makedirs(os.path.dirname(pickle_path), exist_ok=True)
-        with open(pickle_path, 'wb') as f:
-            pickle.dump(dummy_data, f)
+    # Create a dummy image
+    image_path = os.path.join(dummy_data_dir, "rgb", "000000.png")
+    if not os.path.exists(image_path):
+        Image.new('RGB', (224, 224)).save(image_path)
+    
+    # Create another dummy image for a different frame
+    image_path_1 = os.path.join(dummy_data_dir, "rgb", "000001.png")
+    if not os.path.exists(image_path_1):
+        Image.new('RGB', (224, 224)).save(image_path_1)
+
+    # Create dummy tool poses
+    poses_path = os.path.join(dummy_data_dir, "tool_poses.pkl")
+    if not os.path.exists(poses_path):
+        tool_poses = np.random.rand(2, 7) # 2 frames, 7-d pose
+        with open(poses_path, 'wb') as f:
+            pickle.dump(tool_poses, f)
             
     main()
