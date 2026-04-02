@@ -1,9 +1,9 @@
 from lightning.pytorch.cli import LightningCLI
-from genie.dataset import LightningOpenX
+from genie.dataset import LightningStage1PoseDataModule
 from genie.model import DINO_LAM
 
 cli = LightningCLI(
     DINO_LAM,
-    LightningOpenX,
+    LightningStage1PoseDataModule,
     seed_everything_default=42,
 )

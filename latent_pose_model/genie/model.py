@@ -15,7 +15,7 @@ from accelerate import PartialState
 
 OptimizerCallable = Callable[[Iterable], Optimizer]
 
-from genie.modules import UncontrolledDINOLatentActionModel, ControllableDINOLatentActionModel
+from genie.modules import UncontrolledDINOLatentPoseModel, ControllableDINOLatentPoseModel
 import logging
 logging.basicConfig(format='%(message)s', level=logging.INFO)
 
@@ -23,13 +23,13 @@ logging.basicConfig(format='%(message)s', level=logging.INFO)
 
 class DINO_LAM(LightningModule):
     """
-    A latent action model operates at the DINO latent space
+    A latent pose model operates at the DINO latent space
     """
 
     def __init__(
             self,
             image_channels: int = 3,
-            # Latent action model
+            # Latent pose model
             lam_model_dim: int = 512,
             lam_latent_dim: int = 32,
             lam_num_latents: int = 8,
@@ -37,6 +37,8 @@ class DINO_LAM(LightningModule):
             lam_enc_blocks: int = 8,
             lam_dec_blocks: int = 8,
             lam_num_heads: int = 8,
+            lam_pose_dim: int = 7,
+            lam_num_pose_tokens: int = 4,
             lam_dropout: float = 0.0,
             vq_beta: float = 0.25,
             log_interval: int = 1000,
@@ -50,7 +52,7 @@ class DINO_LAM(LightningModule):
         super(DINO_LAM, self).__init__()
         assert stage in ['stage-1', 'stage-2']
 
-        lam = UncontrolledDINOLatentActionModel if stage == 'stage-1' else ControllableDINOLatentActionModel
+        lam = UncontrolledDINOLatentPoseModel if stage == 'stage-1' else ControllableDINOLatentPoseModel
 
         self.lam = lam(
                     in_dim=image_channels,
@@ -61,14 +63,16 @@ class DINO_LAM(LightningModule):
                     enc_blocks=lam_enc_blocks,
                     dec_blocks=lam_dec_blocks,
                     num_heads=lam_num_heads,
+                    pose_dim=lam_pose_dim,
+                    num_pose_tokens=lam_num_pose_tokens,
                     dropout=lam_dropout,
                 )
         
         if stage_one_ckpt and path.exists(stage_one_ckpt):
-            lam_ckpt = torch.load(stage_one_ckpt)['state_dict']
+            lam_ckpt = torch.load(stage_one_ckpt, map_location="cpu")['state_dict']
             stage1_ckpt = {}
             for key in lam_ckpt.keys():
-                if 'vq' in key or 'action_latent' in key:
+                if 'vq' in key or 'pose_token' in key or 'controllable_pose_token' in key:
                     stage1_ckpt[key.replace("lam.", "")] = lam_ckpt[key]
             self.lam.load_state_dict(stage1_ckpt, strict=False)
 
@@ -88,7 +92,7 @@ class DINO_LAM(LightningModule):
             wandb.init(name=task_name, reinit=True)
 
     def shared_step(self, batch: Dict) -> Tuple:
-        # batch: keys['videos', 'task_instruction', 'action', 'dataset_names']
+        # batch: keys['videos', 'task_instruction', 'current_tool_pose', 'target_pose', 'pose_delta']
 
         outputs = self.lam(batch)
         gt_future_frames = outputs["target"]
@@ -108,7 +112,7 @@ class DINO_LAM(LightningModule):
 
         # Compute code usage
         unique, counts = torch.unique(outputs["indices"], return_counts=True)
-        index_counts = torch.zeros(self.lam_num_latents, dtype=torch.long).cuda()
+        index_counts = torch.zeros(self.lam_num_latents, dtype=torch.long, device=self.device)
         index_counts[unique] = counts
         code_usage = (index_counts != 0).float().mean()
 
@@ -121,7 +125,7 @@ class DINO_LAM(LightningModule):
 
         if "indices_uncontrol" in outputs.keys():
             unique, counts = torch.unique(outputs["indices_uncontrol"], return_counts=True)
-            index_counts = torch.zeros(32, dtype=torch.long).cuda()
+            index_counts = torch.zeros(32, dtype=torch.long, device=self.device)
             index_counts[unique] = counts
             uncontrol_code_usage = (index_counts != 0).float().mean()
 
@@ -157,6 +161,18 @@ class DINO_LAM(LightningModule):
         if self.distributed_state.is_main_process:
             wandb.log({**{"train_loss": loss}, **{f"train/{k}": v for k, v in aux_losses}})
 
+        return loss
+
+    def validation_step(self, batch: Dict, batch_idx: int) -> Tensor:
+        _, loss, aux_losses = self.shared_step(batch)
+        self.log_dict(
+            {**{"val_loss": loss}, **{f"val/{k}": v for k, v in aux_losses}},
+            prog_bar=True,
+            logger=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+        )
         return loss
 
 
