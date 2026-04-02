@@ -1,97 +1,121 @@
-import torch
-from torch.utils.data import Dataset
 import os
 import pickle
+from typing import Dict, List, Optional
+
 import numpy as np
-from PIL import Image
+import torch
 import torchvision.transforms as transforms
+from PIL import Image
+from torch.utils.data import Dataset
+
 
 class Stage1Dataset(Dataset):
-    """
-    Dataset for Stage 1, loading data from a directory structure.
-    """
-    def __init__(self, root_dir="data/stage1_data/parsed_taco_data", transform=None):
+    """Dataset for stage 1 sequence-to-target pose prediction."""
+
+    def __init__(
+        self,
+        root_dir: str = "data/stage1_data/parsed_taco_data",
+        transform: Optional[transforms.Compose] = None,
+    ) -> None:
         self.root_dir = root_dir
-        self.samples = []
-        self.transform = transform
-        if self.transform is None:
-            self.transform = transforms.Compose([
+        self.transform = transform or transforms.Compose(
+            [
                 transforms.Resize((224, 224)),
                 transforms.ToTensor(),
-            ])
+            ]
+        )
+        self.samples: List[Dict[str, object]] = []
 
+        if not os.path.isdir(self.root_dir):
+            raise FileNotFoundError(
+                f"Stage1 dataset directory was not found: {self.root_dir}"
+            )
+
+        self._build_index()
+
+    def _build_index(self) -> None:
         for task_dir in sorted(os.listdir(self.root_dir)):
             task_path = os.path.join(self.root_dir, task_dir)
             if not os.path.isdir(task_path):
                 continue
+
             for seq_dir in sorted(os.listdir(task_path)):
                 seq_path = os.path.join(task_path, seq_dir)
                 if not os.path.isdir(seq_path):
                     continue
-                
-                tool_poses_path = os.path.join(seq_path, 'tool_poses.pkl')
-                if os.path.exists(tool_poses_path):
-                    with open(tool_poses_path, 'rb') as f:
-                        tool_poses = pickle.load(f)
-                    num_frames = len(tool_poses)
-                    for i in range(num_frames):
-                        self.samples.append((seq_path, i))
 
-    def __len__(self):
-        return len(self.samples) - 1
+                tool_poses_path = os.path.join(seq_path, "tool_poses.pkl")
+                rgb_dir = os.path.join(seq_path, "rgb")
+                if not os.path.isfile(tool_poses_path) or not os.path.isdir(rgb_dir):
+                    continue
 
-    def __getitem__(self, idx):
-        seq_path, frame_idx = self.samples[idx]
-        
-        # Load tool poses
-        with open(os.path.join(seq_path, 'tool_poses.pkl'), 'rb') as f:
-            tool_poses = pickle.load(f)
+                with open(tool_poses_path, "rb") as handle:
+                    tool_poses = np.asarray(pickle.load(handle), dtype=np.float32)
 
-        # The last pose is the target pose.
-        target_pose = torch.from_numpy(tool_poses[-1]).float()
-        
-        # The pose at the current frame_idx is the current tool pose.
-        current_tool_pose = torch.from_numpy(tool_poses[frame_idx]).float()
+                if tool_poses.ndim != 2 or tool_poses.shape[0] < 2:
+                    continue
 
-        # Load the image for the current frame.
-        image_path = os.path.join(seq_path, 'rgb', f'{frame_idx:06d}.png')
-        if not os.path.exists(image_path):
-            # This case should ideally not be hit if data is consistent
-            return None
+                instruction = self._load_instruction(seq_path)
+                target_pose = tool_poses[-1]
+                num_source_frames = tool_poses.shape[0] - 1
 
-        image = Image.open(image_path).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
+                for frame_idx in range(num_source_frames):
+                    image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
+                    if not os.path.isfile(image_path):
+                        continue
 
-        # Instruction is not available, so use a placeholder
-        instruction = "No instruction available"
+                    self.samples.append(
+                        {
+                            "image_path": image_path,
+                            "current_tool_pose": tool_poses[frame_idx].copy(),
+                            "target_pose": target_pose.copy(),
+                            "instruction": instruction,
+                            "sequence_path": seq_path,
+                            "frame_idx": frame_idx,
+                        }
+                    )
+
+    def _load_instruction(self, seq_path: str) -> str:
+        candidates = [
+            "instruction.txt",
+            "instruction.md",
+            "task.txt",
+            "language.txt",
+            "text.txt",
+        ]
+        for filename in candidates:
+            path = os.path.join(seq_path, filename)
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as handle:
+                    text = handle.read().strip()
+                if text:
+                    return text
+        return ""
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        sample = self.samples[idx]
+
+        image = Image.open(sample["image_path"]).convert("RGB")
+        image_tensor = self.transform(image)
 
         return {
-            "image": image,
-            "current_tool_pose": current_tool_pose,
-            "instruction": instruction,
-            "target_pose": target_pose
+            "image": image_tensor,
+            "current_tool_pose": torch.from_numpy(sample["current_tool_pose"]).float(),
+            "instruction": sample["instruction"],
+            "target_pose": torch.from_numpy(sample["target_pose"]).float(),
         }
 
-if __name__ == '__main__':
-    # This assumes the data is in the expected directory structure.
+
+if __name__ == "__main__":
     dataset = Stage1Dataset()
+    print(f"Loaded {len(dataset)} samples.")
     if len(dataset) > 0:
         sample = dataset[0]
-        if sample:
-            print("Sample keys:", sample.keys())
-            print("Image shape:", sample['image'].shape)
-            print("Instruction:", sample['instruction'])
-            print("Current tool pose shape:", sample['current_tool_pose'].shape)
-            print("Target pose shape:", sample['target_pose'].shape)
-            
-        # Check another sample
-        sample = dataset[3]
-        if sample:
-            print("\nSample 101 keys:", sample.keys())
-            print("Image shape:", sample['image'].shape)
-            print("Instruction:", sample['instruction'])
-            print("Current tool pose shape:", sample['current_tool_pose'].shape)
-            print("Target pose shape:", sample['target_pose'].shape)
-    else:
-        print("Dataset is empty. Check the data path and structure.")
+        print("Sample keys:", sample.keys())
+        print("Image shape:", sample["image"].shape)
+        print("Instruction:", sample["instruction"] or "<empty>")
+        print("Current tool pose shape:", sample["current_tool_pose"].shape)
+        print("Target pose shape:", sample["target_pose"].shape)

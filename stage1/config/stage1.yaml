@@ -1,25 +1,38 @@
-# Configuration for Stage 1 Transformer Model
+# Configuration for the Stage 1 pose prediction model.
 
 data:
-  path: data/stage1_data/parsed_taco_data.pkl
+  path: data/stage1_data/parsed_taco_data
+  val_split: 0.1
 
 model:
-  embed_dim: 512
+  embed_dim: 256
   num_heads: 8
-  num_layers: 6
-  image_feature_dim: 1536 # DINOv2 (768) + SigLIP (768)
-  language_feature_dim: 768 # T5-base
+  num_layers: 4
+  image_feature_dim: 1536
+  language_feature_dim: 768
   pose_dim: 7
+  dino_repo: facebookresearch/dinov2
+  dino_model_name: dinov2_vitb14_reg
+  siglip_model_name: google/siglip-base-patch16-224
+  text_model_name: t5-base
+  freeze_backbones: true
 
 training:
   batch_size: 32
   epochs: 100
   learning_rate: 0.0001
+  weight_decay: 0.0001
+  num_workers: 4
+  seed: 42
+  deterministic: true
+  log_every_n_steps: 10
+  checkpoint_dir: checkpoints/stage1
 
 logging:
-  project: "trustworthy_tool_manip"
-  run_name: "stage1_transformer_training"
-  
-# Checkpoint for inference
+  use_wandb: false
+  project: trustworthy_tool_manip
+  run_name: stage1_transformer_training
+  save_dir: logs
+
 inference:
-  checkpoint_path: "checkpoints/last.ckpt" # Update this path to your saved checkpoint
+  checkpoint_path: checkpoints/stage1/last.ckpt

@@ -1,90 +1,76 @@
+import os
+from typing import Iterable
+
+import numpy as np
 import torch
+import torchvision.transforms as transforms
 import yaml
 from PIL import Image
-import torchvision.transforms as transforms
-import numpy as np
-import os
+
 from stage1.model.stage1_transformer import Stage1Transformer
 
-def infer(image_path, instruction, current_tool_pose):
-    # Load configuration
-    with open('stage1/config/stage1.yaml', 'r') as f:
-        config = yaml.safe_load(f)
 
-    # Device
+def load_config() -> dict:
+    with open("stage1/config/stage1.yaml", "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def build_model_from_config(config: dict, checkpoint_path: str, device: torch.device):
+    model = Stage1Transformer.load_from_checkpoint(
+        checkpoint_path,
+        map_location=device,
+        embed_dim=config["model"]["embed_dim"],
+        num_heads=config["model"]["num_heads"],
+        num_layers=config["model"]["num_layers"],
+        image_feature_dim=config["model"]["image_feature_dim"],
+        language_feature_dim=config["model"]["language_feature_dim"],
+        pose_dim=config["model"]["pose_dim"],
+        learning_rate=config["training"]["learning_rate"],
+        weight_decay=config["training"].get("weight_decay", 1e-4),
+        dino_repo=config["model"].get("dino_repo", "facebookresearch/dinov2"),
+        dino_model_name=config["model"].get("dino_model_name", "dinov2_vitb14_reg"),
+        siglip_model_name=config["model"].get("siglip_model_name", "google/siglip-base-patch16-224"),
+        text_model_name=config["model"].get("text_model_name", "t5-base"),
+        freeze_backbones=config["model"].get("freeze_backbones", True),
+    )
+    model.eval()
+    model.to(device)
+    return model
+
+
+def infer(image_path: str, instruction: str, current_tool_pose: Iterable[float]) -> np.ndarray:
+    config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load model from checkpoint
-    checkpoint_path = config['inference']['checkpoint_path']
+    checkpoint_path = config["inference"]["checkpoint_path"]
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}. Please train the model first and update the path in the config.")
-        
-    model = Stage1Transformer.load_from_checkpoint(checkpoint_path).to(device)
-    model.eval()
+        raise FileNotFoundError(
+            f"Checkpoint not found at {checkpoint_path}. Train the model or update the config."
+        )
 
-    # Prepare inputs
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
-    
-    image = Image.open(image_path).convert('RGB')
-    image = transform(image).unsqueeze(0).to(device)
-    
-    instruction = [instruction] # list of strings
-    
-    current_tool_pose = torch.from_numpy(current_tool_pose).float().unsqueeze(0).to(device)
+    model = build_model_from_config(config, checkpoint_path, device)
 
-    # Inference
+    transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+        ]
+    )
+
+    image = Image.open(image_path).convert("RGB")
+    image_tensor = transform(image).unsqueeze(0).to(device)
+    pose_tensor = torch.as_tensor(current_tool_pose, dtype=torch.float32).unsqueeze(0).to(device)
+
     with torch.no_grad():
-        predicted_pose = model(image, current_tool_pose, instruction)
+        predicted_pose = model(image_tensor, pose_tensor, [instruction])
 
     return predicted_pose.cpu().numpy()
 
-if __name__ == '__main__':
-    # Example usage
-    
-    # Create a dummy checkpoint for testing if it doesn't exist
-    checkpoint_path = "checkpoints/last.ckpt"
-    if not os.path.exists(checkpoint_path):
-        print("Creating dummy checkpoint for testing...")
-        os.makedirs("checkpoints", exist_ok=True)
-        # We need a model to save a checkpoint
-        model = Stage1Transformer()
-        trainer = pl.Trainer(max_epochs=1)
-        # A dummy dataloader is needed to save a checkpoint
-        dummy_loader = torch.utils.data.DataLoader(
-            [{
-                "image": torch.randn(3, 224, 224),
-                "instruction": "dummy",
-                "current_tool_pose": torch.randn(7),
-                "target_pose": torch.randn(7)
-            }]
-        )
-        try:
-            # We need to run a dummy training step to create a checkpoint
-            trainer.fit(model, train_dataloader=dummy_loader)
-            trainer.save_checkpoint(checkpoint_path)
-            print("Dummy checkpoint created.")
-        except Exception as e:
-            print(f"Could not create a dummy checkpoint due to: {e}")
-            print("Please train the model to generate a valid checkpoint.")
 
-
-    # Create dummy data for inference if it doesn't exist
-    data_dir = "data/stage1_data/parsed_taco_data/episode_001"
-    image_path = os.path.join(data_dir, "image_000.png")
-    if not os.path.exists(image_path):
-        os.makedirs(data_dir, exist_ok=True)
-        Image.new('RGB', (224, 224)).save(image_path)
-
-
-    instruction = "Pick up the tool."
-    current_tool_pose = np.random.rand(7)
-    
-    if os.path.exists(checkpoint_path):
-        predicted_pose = infer(image_path, instruction, current_tool_pose)
-        print("Predicted Pose:", predicted_pose)
+if __name__ == "__main__":
+    sample_image = "data/stage1_data/parsed_taco_data/dummy_task/seq_0/rgb/000000.png"
+    sample_pose = np.zeros(7, dtype=np.float32)
+    if os.path.exists(sample_image):
+        print(infer(sample_image, "pick up the tool", sample_pose))
     else:
-        print("Could not run inference because a valid checkpoint was not found.")
-
+        print(f"Sample image not found: {sample_image}")

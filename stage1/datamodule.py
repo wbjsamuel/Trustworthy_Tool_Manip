@@ -1,89 +1,78 @@
+from typing import Optional
+
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
+
 from stage1.dataset import Stage1Dataset
 
+
 class Stage1DataModule(pl.LightningDataModule):
-    def __init__(self, data_path: str = "data/stage1_data/parsed_taco_data", batch_size: int = 32, num_workers: int = 4):
+    def __init__(
+        self,
+        data_path: str = "data/stage1_data/parsed_taco_data",
+        batch_size: int = 32,
+        num_workers: int = 4,
+        val_split: float = 0.1,
+        seed: int = 42,
+    ) -> None:
         super().__init__()
         self.data_path = data_path
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.val_split = val_split
+        self.seed = seed
+        self.train_dataset: Optional[torch.utils.data.Dataset] = None
+        self.val_dataset: Optional[torch.utils.data.Dataset] = None
+        self.test_dataset: Optional[torch.utils.data.Dataset] = None
 
-    def setup(self, stage=None):
-        # Assign train/val/test datasets for use in dataloaders
-        if stage == 'fit' or stage is None:
-            self.train_dataset = Stage1Dataset(root_dir=self.data_path)
-            # You might want to split your data into train and validation sets
-            # For now, we use the same dataset for both.
-            self.val_dataset = Stage1Dataset(root_dir=self.data_path)
+    def setup(self, stage: Optional[str] = None) -> None:
+        if self.train_dataset is not None and self.val_dataset is not None:
+            return
 
-        if stage == 'test' or stage is None:
-            self.test_dataset = Stage1Dataset(root_dir=self.data_path)
+        full_dataset = Stage1Dataset(root_dir=self.data_path)
+        if len(full_dataset) == 0:
+            raise RuntimeError(f"No valid samples were found under {self.data_path}.")
 
-    def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=self.collate_fn)
+        if len(full_dataset) == 1:
+            self.train_dataset = full_dataset
+            self.val_dataset = full_dataset
+            self.test_dataset = full_dataset
+            return
 
-    def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, collate_fn=self.collate_fn)
+        val_size = max(1, int(round(len(full_dataset) * self.val_split)))
+        val_size = min(val_size, len(full_dataset) - 1)
+        train_size = len(full_dataset) - val_size
 
-    def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, num_workers=self.num_workers, collate_fn=self.collate_fn)
+        generator = torch.Generator().manual_seed(self.seed)
+        self.train_dataset, self.val_dataset = random_split(
+            full_dataset, [train_size, val_size], generator=generator
+        )
+        self.test_dataset = self.val_dataset
 
-    @staticmethod
-    def collate_fn(batch):
-        batch = [item for item in batch if item is not None]
-        if not batch:
-            return None
-        
-        images = torch.stack([item['image'] for item in batch])
-        instructions = [item['instruction'] for item in batch]
-        current_tool_poses = torch.stack([item['current_tool_pose'] for item in batch])
-        target_poses = torch.stack([item['target_pose'] for item in batch])
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
 
-        return {
-            'image': images,
-            'instruction': instructions,
-            'current_tool_pose': current_tool_poses,
-            'target_pose': target_poses
-        }
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
 
-if __name__ == '__main__':
-    # Create dummy data if it doesn't exist
-    import os
-    import pickle
-    import numpy as np
-    from PIL import Image
-
-    dummy_data_dir = "data/stage1_data/parsed_taco_data/dummy_task/seq_0"
-    os.makedirs(os.path.join(dummy_data_dir, "rgb"), exist_ok=True)
-
-    # Create a dummy image
-    image_path = os.path.join(dummy_data_dir, "rgb", "000000.png")
-    Image.new('RGB', (224, 224)).save(image_path)
-    
-    # Create another dummy image for a different frame
-    image_path_1 = os.path.join(dummy_data_dir, "rgb", "000001.png")
-    Image.new('RGB', (224, 224)).save(image_path_1)
-
-    # Create dummy tool poses
-    tool_poses = np.random.rand(2, 7) # 2 frames, 7-d pose
-    poses_path = os.path.join(dummy_data_dir, "tool_poses.pkl")
-    with open(poses_path, 'wb') as f:
-        pickle.dump(tool_poses, f)
-
-    dm = Stage1DataModule(data_path="data/stage1_data/parsed_taco_data")
-    dm.setup()
-    train_loader = dm.train_dataloader()
-    
-    print(f"Dataset has {len(dm.train_dataset)} samples.")
-
-    for batch in train_loader:
-        if batch:
-            print("Batch keys:", batch.keys())
-            print("Image batch shape:", batch['image'].shape)
-            print("Current tool pose batch shape:", batch['current_tool_pose'].shape)
-            print("Target pose batch shape:", batch['target_pose'].shape)
-            break
-        else:
-            print("Received an empty batch.")
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )

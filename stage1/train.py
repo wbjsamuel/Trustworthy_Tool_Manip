@@ -1,86 +1,90 @@
+from pathlib import Path
+
+import pytorch_lightning as pl
 import torch
 import yaml
-import os
-import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger
-from stage1.model.stage1_transformer import Stage1Transformer
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.loggers import CSVLogger
+
 from stage1.datamodule import Stage1DataModule
+from stage1.model.stage1_transformer import Stage1Transformer
 
-def main():
-    # Load configuration
-    with open('stage1/config/stage1.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+try:
+    from pytorch_lightning.loggers import WandbLogger
+except ImportError:  # pragma: no cover - optional dependency
+    WandbLogger = None
 
-    # --- Setup ---
-    # DataModule
+
+def load_config() -> dict:
+    with open("stage1/config/stage1.yaml", "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def build_logger(config: dict):
+    logging_config = config.get("logging", {})
+    if logging_config.get("use_wandb", False) and WandbLogger is not None:
+        return WandbLogger(
+            project=logging_config["project"],
+            name=logging_config["run_name"],
+        )
+    save_dir = logging_config.get("save_dir", "logs")
+    return CSVLogger(save_dir=save_dir, name=logging_config.get("run_name", "stage1"))
+
+
+def main() -> None:
+    config = load_config()
+
     dm = Stage1DataModule(
-        data_path=config['data']['path'], 
-        batch_size=config['training']['batch_size'],
-        num_workers=config['training'].get('num_workers', 4)
+        data_path=config["data"]["path"],
+        batch_size=config["training"]["batch_size"],
+        num_workers=config["training"].get("num_workers", 4),
+        val_split=config["data"].get("val_split", 0.1),
+        seed=config["training"].get("seed", 42),
     )
 
-    # Model
     model = Stage1Transformer(
-        embed_dim=config['model']['embed_dim'],
-        num_heads=config['model']['num_heads'],
-        num_layers=config['model']['num_layers'],
-        learning_rate=config['training']['learning_rate']
+        embed_dim=config["model"]["embed_dim"],
+        num_heads=config["model"]["num_heads"],
+        num_layers=config["model"]["num_layers"],
+        image_feature_dim=config["model"]["image_feature_dim"],
+        language_feature_dim=config["model"]["language_feature_dim"],
+        pose_dim=config["model"]["pose_dim"],
+        learning_rate=config["training"]["learning_rate"],
+        weight_decay=config["training"].get("weight_decay", 1e-4),
+        dino_repo=config["model"].get("dino_repo", "facebookresearch/dinov2"),
+        dino_model_name=config["model"].get("dino_model_name", "dinov2_vitb14_reg"),
+        siglip_model_name=config["model"].get("siglip_model_name", "google/siglip-base-patch16-224"),
+        text_model_name=config["model"].get("text_model_name", "t5-base"),
+        freeze_backbones=config["model"].get("freeze_backbones", True),
     )
-    
-    # Logger
-    wandb_logger = WandbLogger(
-        project=config['logging']['project'],
-        name=config['logging']['run_name']
-    )
-    wandb_logger.watch(model)
-    
-    # Trainer
+
+    checkpoint_dir = Path(config["training"].get("checkpoint_dir", "checkpoints/stage1"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    callbacks = [
+        ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            filename="stage1-{epoch:02d}-{val_loss:.4f}",
+            monitor="val_loss",
+            mode="min",
+            save_last=True,
+            save_top_k=1,
+        ),
+        LearningRateMonitor(logging_interval="epoch"),
+    ]
+
     trainer = pl.Trainer(
-        max_epochs=config['training']['epochs'],
-        logger=wandb_logger,
-        gpus=1 if torch.cuda.is_available() else 0
+        max_epochs=config["training"]["epochs"],
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1,
+        logger=build_logger(config),
+        callbacks=callbacks,
+        deterministic=config["training"].get("deterministic", True),
+        log_every_n_steps=config["training"].get("log_every_n_steps", 10),
     )
 
-    # --- Training ---
-    trainer.fit(model, dm)
+    trainer.fit(model, datamodule=dm)
 
 
-if __name__ == '__main__':
-    # Setup dummy data and config for testing
-    if not os.path.exists("stage1/config/stage1.yaml"):
-        os.makedirs("stage1/config", exist_ok=True)
-        dummy_config = {
-            'data': {'path': 'data/stage1_data/parsed_taco_data'},
-            'model': {'embed_dim': 512, 'num_heads': 8, 'num_layers': 6},
-            'training': {'batch_size': 2, 'epochs': 2, 'learning_rate': 1e-4, 'num_workers': 0},
-            'logging': {'project': 'trustworthy_tool_manip', 'run_name': 'stage1_test_run'}
-        }
-        with open("stage1/config/stage1.yaml", "w") as f:
-            yaml.dump(dummy_config, f)
-    
-    # Create dummy data files if they don't exist
-    import pickle
-    import numpy as np
-    from PIL import Image
-
-    dummy_data_dir = "data/stage1_data/parsed_taco_data/dummy_task/seq_0"
-    os.makedirs(os.path.join(dummy_data_dir, "rgb"), exist_ok=True)
-
-    # Create a dummy image
-    image_path = os.path.join(dummy_data_dir, "rgb", "000000.png")
-    if not os.path.exists(image_path):
-        Image.new('RGB', (224, 224)).save(image_path)
-    
-    # Create another dummy image for a different frame
-    image_path_1 = os.path.join(dummy_data_dir, "rgb", "000001.png")
-    if not os.path.exists(image_path_1):
-        Image.new('RGB', (224, 224)).save(image_path_1)
-
-    # Create dummy tool poses
-    poses_path = os.path.join(dummy_data_dir, "tool_poses.pkl")
-    if not os.path.exists(poses_path):
-        tool_poses = np.random.rand(2, 7) # 2 frames, 7-d pose
-        with open(poses_path, 'wb') as f:
-            pickle.dump(tool_poses, f)
-            
+if __name__ == "__main__":
     main()
