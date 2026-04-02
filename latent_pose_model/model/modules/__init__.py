@@ -1,4 +1,4 @@
-from latent_pose_model.genie.modules.lam import (
+from latent_pose_model.model.modules.lam import (
     ControllableDINOLatentPoseModel,
     UncontrolledDINOLatentPoseModel,
 )

@@ -7,7 +7,7 @@ from torch import Tensor
 from torchvision import transforms
 from transformers import AutoTokenizer, T5EncoderModel
 
-from latent_pose_model.genie.modules.blocks import (
+from latent_pose_model.model.modules.blocks import (
     SpatioTemporalTransformer,
     SpatioTransformer,
     VectorQuantizer,

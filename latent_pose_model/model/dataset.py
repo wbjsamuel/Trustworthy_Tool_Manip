@@ -59,26 +59,26 @@ class Stage1PoseDataset(Dataset):
                 if tool_poses.ndim != 2 or tool_poses.shape[0] < 2:
                     continue
 
-                target_frame_idx = tool_poses.shape[0] - 1
-                target_image_path = rgb_dir / f"{target_frame_idx:06d}.png"
-                if not target_image_path.is_file():
-                    continue
-
                 instruction = self._load_instruction(seq_dir)
-                target_pose = tool_poses[target_frame_idx].copy()
+                num_frames = tool_poses.shape[0]
 
-                for frame_idx in range(target_frame_idx):
+                for frame_idx in range(num_frames - 1):
                     current_image_path = rgb_dir / f"{frame_idx:06d}.png"
+                    next_image_path = rgb_dir / f"{frame_idx + 1:06d}.png"
                     if not current_image_path.is_file():
                         continue
+                    if not next_image_path.is_file():
+                        continue
+
                     current_pose = tool_poses[frame_idx].copy()
+                    next_pose = tool_poses[frame_idx + 1].copy()
                     self.samples.append(
                         {
                             "current_image_path": current_image_path,
-                            "target_image_path": target_image_path,
+                            "target_image_path": next_image_path,
                             "current_tool_pose": current_pose,
-                            "target_pose": target_pose,
-                            "pose_delta": (target_pose - current_pose).copy(),
+                            "target_pose": next_pose,
+                            "pose_delta": (next_pose - current_pose).copy(),
                             "instruction": instruction,
                         }
                     )

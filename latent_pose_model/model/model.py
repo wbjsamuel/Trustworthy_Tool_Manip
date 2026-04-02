@@ -15,7 +15,7 @@ from accelerate import PartialState
 
 OptimizerCallable = Callable[[Iterable], Optimizer]
 
-from genie.modules import UncontrolledDINOLatentPoseModel, ControllableDINOLatentPoseModel
+from model.modules import UncontrolledDINOLatentPoseModel, ControllableDINOLatentPoseModel
 import logging
 logging.basicConfig(format='%(message)s', level=logging.INFO)
 
