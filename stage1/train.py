@@ -37,6 +37,9 @@ def build_logger(config: dict):
 
 def main() -> None:
     config = load_config()
+    torch.set_float32_matmul_precision(config["training"].get("matmul_precision", "high"))
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = config["training"].get("cudnn_benchmark", True)
 
     dm = Stage1DataModule(
         data_path=config["data"]["path"],
@@ -44,6 +47,8 @@ def main() -> None:
         num_workers=config["training"].get("num_workers", 4),
         val_split=config["data"].get("val_split", 0.1),
         seed=config["training"].get("seed", 42),
+        prefetch_factor=config["training"].get("prefetch_factor", 4),
+        persistent_workers=config["training"].get("persistent_workers", True),
     )
 
     model = Stage1Transformer(
@@ -87,6 +92,8 @@ def main() -> None:
         callbacks=callbacks,
         deterministic=config["training"].get("deterministic", True),
         log_every_n_steps=config["training"].get("log_every_n_steps", 10),
+        precision=config["training"].get("precision", "bf16-mixed"),
+        check_val_every_n_epoch=config["training"].get("check_val_every_n_epoch", 5),
     )
 
     trainer.fit(model, datamodule=dm)

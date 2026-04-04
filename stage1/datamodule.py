@@ -15,6 +15,8 @@ class Stage1DataModule(pl.LightningDataModule):
         num_workers: int = 4,
         val_split: float = 0.1,
         seed: int = 42,
+        prefetch_factor: int = 4,
+        persistent_workers: bool = True,
     ) -> None:
         super().__init__()
         self.data_path = data_path
@@ -22,6 +24,8 @@ class Stage1DataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.val_split = val_split
         self.seed = seed
+        self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers and num_workers > 0
         self.train_dataset: Optional[torch.utils.data.Dataset] = None
         self.val_dataset: Optional[torch.utils.data.Dataset] = None
         self.test_dataset: Optional[torch.utils.data.Dataset] = None
@@ -57,6 +61,8 @@ class Stage1DataModule(pl.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),
+            persistent_workers=self.persistent_workers,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -66,6 +72,8 @@ class Stage1DataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),
+            persistent_workers=self.persistent_workers,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -75,4 +83,6 @@ class Stage1DataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=torch.cuda.is_available(),
+            persistent_workers=self.persistent_workers,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
         )

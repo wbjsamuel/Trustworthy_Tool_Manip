@@ -1,15 +1,15 @@
 # Configuration for the Stage 1 pose prediction model.
 
 data:
-  path: stage1/stage1_data/parsed_taco_dataset
+  path: data/stage1_data/parsed_taco_data
   val_split: 0.1
 
 model:
-  embed_dim: 2048
-  num_heads: 16
-  num_layers: 8
-  feedforward_mult: 8
-  num_fusion_tokens: 32
+  embed_dim: 1024
+  num_heads: 8
+  num_layers: 6
+  feedforward_mult: 4
+  num_fusion_tokens: 16
   image_feature_dim: 1536
   language_feature_dim: 768
   pose_dim: 16
@@ -20,15 +20,21 @@ model:
   freeze_backbones: true
 
 training:
-  batch_size: 32
+  batch_size: 48
   epochs: 100
   learning_rate: 0.0001
   weight_decay: 0.0001
-  num_workers: 4
+  num_workers: 8
+  prefetch_factor: 4
+  persistent_workers: true
   seed: 42
-  deterministic: true
+  deterministic: false
   log_every_n_steps: 10
   checkpoint_dir: checkpoints/stage1
+  precision: 32
+  matmul_precision: high
+  cudnn_benchmark: true
+  check_val_every_n_epoch: 5
 
 logging:
   use_wandb: true
