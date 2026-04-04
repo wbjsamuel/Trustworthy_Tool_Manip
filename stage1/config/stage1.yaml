@@ -1,13 +1,15 @@
 # Configuration for the Stage 1 pose prediction model.
 
 data:
-  path: data/stage1_data/parsed_taco_data
+  path: stage1/stage1_data/parsed_taco_dataset
   val_split: 0.1
 
 model:
-  embed_dim: 256
-  num_heads: 8
-  num_layers: 4
+  embed_dim: 2048
+  num_heads: 16
+  num_layers: 8
+  feedforward_mult: 8
+  num_fusion_tokens: 32
   image_feature_dim: 1536
   language_feature_dim: 768
   pose_dim: 16

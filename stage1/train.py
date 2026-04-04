@@ -46,6 +46,8 @@ def main() -> None:
         embed_dim=config["model"]["embed_dim"],
         num_heads=config["model"]["num_heads"],
         num_layers=config["model"]["num_layers"],
+        feedforward_mult=config["model"].get("feedforward_mult", 8),
+        num_fusion_tokens=config["model"].get("num_fusion_tokens", 32),
         image_feature_dim=config["model"]["image_feature_dim"],
         language_feature_dim=config["model"]["language_feature_dim"],
         pose_dim=config["model"]["pose_dim"],

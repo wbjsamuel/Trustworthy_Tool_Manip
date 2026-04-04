@@ -124,9 +124,11 @@ class Stage1Transformer(pl.LightningModule):
         image_feature_dim: int = 1536,
         language_feature_dim: int = 768,
         pose_dim: int = 16,
-        num_heads: int = 8,
-        num_layers: int = 4,
-        embed_dim: int = 256,
+        num_heads: int = 16,
+        num_layers: int = 8,
+        embed_dim: int = 2048,
+        feedforward_mult: int = 8,
+        num_fusion_tokens: int = 32,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-4,
         dino_repo: str = "facebookresearch/dinov2",
@@ -156,13 +158,18 @@ class Stage1Transformer(pl.LightningModule):
 
         self.image_proj = nn.Linear(image_feature_dim, embed_dim)
         self.language_proj = nn.Linear(language_feature_dim, embed_dim)
-        self.pose_proj = nn.Linear(pose_dim, embed_dim)
+        self.pose_proj = nn.Sequential(
+            nn.Linear(pose_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
         self.modality_embeddings = nn.Parameter(torch.randn(3, embed_dim))
+        self.fusion_tokens = nn.Parameter(torch.randn(1, num_fusion_tokens, embed_dim))
 
         transformer_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
+            dim_feedforward=embed_dim * feedforward_mult,
             dropout=0.1,
             activation="gelu",
             batch_first=True,
@@ -171,6 +178,8 @@ class Stage1Transformer(pl.LightningModule):
         self.transformer = nn.TransformerEncoder(transformer_layer, num_layers=num_layers)
         self.output_head = nn.Sequential(
             nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, pose_dim),
@@ -196,9 +205,11 @@ class Stage1Transformer(pl.LightningModule):
             ],
             dim=1,
         )
+        fusion_tokens = self.fusion_tokens.expand(image.shape[0], -1, -1)
+        combined_input = torch.cat([fusion_tokens, combined_input], dim=1)
 
         transformer_output = self.transformer(combined_input)
-        fused_embedding = transformer_output.mean(dim=1)
+        fused_embedding = transformer_output[:, : self.hparams.num_fusion_tokens].mean(dim=1)
         return self.output_head(fused_embedding)
 
     def _shared_step(self, batch: dict, stage: str) -> torch.Tensor:
