@@ -14,7 +14,7 @@ class Stage1Dataset(Dataset):
 
     def __init__(
         self,
-        root_dir: str = "stage1/stage1_data/parsed_taco_dataset",
+        root_dir: str = "data/stage1_data/parsed_taco_data",
         transform: Optional[transforms.Compose] = None,
     ) -> None:
         self.root_dir = root_dir
@@ -33,6 +33,22 @@ class Stage1Dataset(Dataset):
 
         self._build_index()
 
+    @staticmethod
+    def _load_pose_sequence(tool_poses_path: str) -> np.ndarray:
+        with open(tool_poses_path, "rb") as handle:
+            tool_poses = np.asarray(pickle.load(handle), dtype=np.float32)
+
+        # Stored poses come in as (1, L, 4, 4). Remove the singleton batch axis
+        # so we can index the temporal dimension directly.
+        tool_poses = np.squeeze(tool_poses)
+
+        if tool_poses.ndim != 3 or tool_poses.shape[1:] != (4, 4):
+            raise ValueError(
+                f"Expected tool poses with shape (L, 4, 4) after squeeze, got {tool_poses.shape}"
+            )
+
+        return tool_poses
+
     def _build_index(self) -> None:
         for task_dir in sorted(os.listdir(self.root_dir)):
             # breakpoint()
@@ -50,10 +66,9 @@ class Stage1Dataset(Dataset):
                 if not os.path.isfile(tool_poses_path) or not os.path.isdir(rgb_dir):
                     continue
 
-                with open(tool_poses_path, "rb") as handle:
-                    tool_poses = np.asarray(pickle.load(handle), dtype=np.float32).squeeze()
+                tool_poses = self._load_pose_sequence(tool_poses_path)
 
-                if tool_poses.ndim != 3 or tool_poses.shape[0] < 2:
+                if tool_poses.shape[0] < 2:
                     continue
 
                 instruction = self._load_instruction(seq_path)
@@ -68,8 +83,8 @@ class Stage1Dataset(Dataset):
                     self.samples.append(
                         {
                             "image_path": image_path,
-                            "current_tool_pose": tool_poses[frame_idx].copy(),
-                            "target_pose": target_pose.copy(),
+                            "current_tool_pose": tool_poses[frame_idx].reshape(-1).copy(),
+                            "target_pose": target_pose.reshape(-1).copy(),
                             "instruction": instruction,
                             "sequence_path": seq_path,
                             "frame_idx": frame_idx,

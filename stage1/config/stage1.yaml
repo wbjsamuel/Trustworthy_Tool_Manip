@@ -1,7 +1,7 @@
 # Configuration for the Stage 1 pose prediction model.
 
 data:
-  path: stage1/stage1_data/parsed_taco_dataset
+  path: data/stage1_data/parsed_taco_data
   val_split: 0.1
 
 model:
@@ -10,7 +10,7 @@ model:
   num_layers: 4
   image_feature_dim: 1536
   language_feature_dim: 768
-  pose_dim: 7
+  pose_dim: 16
   dino_repo: facebookresearch/dinov2
   dino_model_name: dinov2_vitb14_reg
   siglip_model_name: google/siglip-base-patch16-224

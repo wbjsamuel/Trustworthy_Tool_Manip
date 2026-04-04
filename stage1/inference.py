@@ -10,6 +10,17 @@ from PIL import Image
 from stage1.model.stage1_transformer import Stage1Transformer
 
 
+def preprocess_tool_pose(current_tool_pose: Iterable[float]) -> np.ndarray:
+    pose = np.asarray(current_tool_pose, dtype=np.float32).squeeze()
+    if pose.shape == (4, 4):
+        return pose.reshape(-1)
+    if pose.shape == (16,):
+        return pose
+    raise ValueError(
+        f"Expected current_tool_pose to be a 4x4 matrix or flattened 16-vector, got shape {pose.shape}"
+    )
+
+
 def load_config() -> dict:
     with open("stage1/config/stage1.yaml", "r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
@@ -59,7 +70,7 @@ def infer(image_path: str, instruction: str, current_tool_pose: Iterable[float])
 
     image = Image.open(image_path).convert("RGB")
     image_tensor = transform(image).unsqueeze(0).to(device)
-    pose_tensor = torch.as_tensor(current_tool_pose, dtype=torch.float32).unsqueeze(0).to(device)
+    pose_tensor = torch.from_numpy(preprocess_tool_pose(current_tool_pose)).unsqueeze(0).to(device)
 
     with torch.no_grad():
         predicted_pose = model(image_tensor, pose_tensor, [instruction])
@@ -68,8 +79,8 @@ def infer(image_path: str, instruction: str, current_tool_pose: Iterable[float])
 
 
 if __name__ == "__main__":
-    sample_image = "stage1_data/parsed_taco_dataset/dummy_task/seq_0/rgb/000000.png"
-    sample_pose = np.zeros(7, dtype=np.float32)
+    sample_image = "data/stage1_data/parsed_taco_data/dummy_task/seq_0/rgb/000000.png"
+    sample_pose = np.eye(4, dtype=np.float32)
     if os.path.exists(sample_image):
         print(infer(sample_image, "pick up the tool", sample_pose))
     else:

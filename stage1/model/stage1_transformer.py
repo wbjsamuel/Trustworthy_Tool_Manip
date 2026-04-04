@@ -123,7 +123,7 @@ class Stage1Transformer(pl.LightningModule):
         self,
         image_feature_dim: int = 1536,
         language_feature_dim: int = 768,
-        pose_dim: int = 7,
+        pose_dim: int = 16,
         num_heads: int = 8,
         num_layers: int = 4,
         embed_dim: int = 256,
@@ -237,7 +237,7 @@ class Stage1Transformer(pl.LightningModule):
 if __name__ == "__main__":
     model = Stage1Transformer()
     image = torch.randn(2, 3, 224, 224)
-    tool_pose = torch.randn(2, 7)
+    tool_pose = torch.randn(2, 16)
     instruction = ["pick up the tool", "place the block on the red square"]
     predicted_pose = model(image, tool_pose, instruction)
     print("Predicted Pose shape:", predicted_pose.shape)
