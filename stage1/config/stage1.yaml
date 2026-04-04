@@ -5,11 +5,11 @@ data:
   val_split: 0.1
 
 model:
-  embed_dim: 1024
-  num_heads: 8
-  num_layers: 6
-  feedforward_mult: 4
-  num_fusion_tokens: 16
+  embed_dim: 2048
+  num_heads: 16
+  num_layers: 8
+  feedforward_mult: 8
+  num_fusion_tokens: 32
   image_feature_dim: 1536
   language_feature_dim: 768
   pose_dim: 16
