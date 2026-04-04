@@ -23,10 +23,14 @@ def load_config() -> dict:
 def build_logger(config: dict):
     logging_config = config.get("logging", {})
     if logging_config.get("use_wandb", False) and WandbLogger is not None:
-        return WandbLogger(
+        logger = WandbLogger(
             project=logging_config["project"],
             name=logging_config["run_name"],
+            save_dir=logging_config.get("save_dir", "logs"),
+            mode=logging_config.get("mode", "online"),
         )
+        logger.experiment.config.update(config, allow_val_change=True)
+        return logger
     save_dir = logging_config.get("save_dir", "logs")
     return CSVLogger(save_dir=save_dir, name=logging_config.get("run_name", "stage1"))
 
@@ -86,6 +90,9 @@ def main() -> None:
     )
 
     trainer.fit(model, datamodule=dm)
+
+    if isinstance(trainer.logger, WandbLogger):
+        trainer.logger.experiment.finish()
 
 
 if __name__ == "__main__":

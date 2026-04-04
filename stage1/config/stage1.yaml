@@ -31,10 +31,11 @@ training:
   checkpoint_dir: checkpoints/stage1
 
 logging:
-  use_wandb: false
+  use_wandb: true
   project: trustworthy_tool_manip
   run_name: stage1_transformer_training
   save_dir: logs
+  mode: online
 
 inference:
   checkpoint_path: checkpoints/stage1/last.ckpt
