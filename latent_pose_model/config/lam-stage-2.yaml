@@ -25,7 +25,7 @@ model:
   stage_one_ckpt: ./logs/task_centric_lpm_stage1/last.ckpt
 
 data:
-  data_root: data/stage1_data/parsed_taco_data
+  data_root: stage1_data/parsed_taco_data
   batch_size: 16
   resolution: 224
   num_workers: 4

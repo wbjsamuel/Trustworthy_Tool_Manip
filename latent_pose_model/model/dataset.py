@@ -103,7 +103,7 @@ class Stage1PoseDataset(Dataset):
 class LightningStage1PoseDataModule(LightningDataModule):
     def __init__(
         self,
-        data_root: str = "data/stage1_data/parsed_taco_data",
+        data_root: str = "data/stage1_data/parsed_taco_dataset",
         batch_size: int = 16,
         resolution: int = 224,
         num_workers: int = 4,

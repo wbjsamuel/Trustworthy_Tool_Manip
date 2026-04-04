@@ -10,7 +10,7 @@ from stage1.dataset import Stage1Dataset
 class Stage1DataModule(pl.LightningDataModule):
     def __init__(
         self,
-        data_path: str = "data/stage1_data/parsed_taco_data",
+        data_path: str = "stage1_data/parsed_taco_dataset",
         batch_size: int = 32,
         num_workers: int = 4,
         val_split: float = 0.1,

@@ -68,7 +68,7 @@ def infer(image_path: str, instruction: str, current_tool_pose: Iterable[float])
 
 
 if __name__ == "__main__":
-    sample_image = "data/stage1_data/parsed_taco_data/dummy_task/seq_0/rgb/000000.png"
+    sample_image = "stage1_data/parsed_taco_dataset/dummy_task/seq_0/rgb/000000.png"
     sample_pose = np.zeros(7, dtype=np.float32)
     if os.path.exists(sample_image):
         print(infer(sample_image, "pick up the tool", sample_pose))

@@ -1,7 +1,7 @@
 # Configuration for the Stage 1 pose prediction model.
 
 data:
-  path: data/stage1_data/parsed_taco_data
+  path: stage1/stage1_data/parsed_taco_dataset
   val_split: 0.1
 
 model:

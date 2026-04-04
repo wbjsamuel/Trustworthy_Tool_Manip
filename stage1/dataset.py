@@ -14,7 +14,7 @@ class Stage1Dataset(Dataset):
 
     def __init__(
         self,
-        root_dir: str = "data/stage1_data/parsed_taco_data",
+        root_dir: str = "stage1/stage1_data/parsed_taco_dataset",
         transform: Optional[transforms.Compose] = None,
     ) -> None:
         self.root_dir = root_dir
@@ -35,6 +35,7 @@ class Stage1Dataset(Dataset):
 
     def _build_index(self) -> None:
         for task_dir in sorted(os.listdir(self.root_dir)):
+            # breakpoint()
             task_path = os.path.join(self.root_dir, task_dir)
             if not os.path.isdir(task_path):
                 continue
@@ -50,9 +51,9 @@ class Stage1Dataset(Dataset):
                     continue
 
                 with open(tool_poses_path, "rb") as handle:
-                    tool_poses = np.asarray(pickle.load(handle), dtype=np.float32)
+                    tool_poses = np.asarray(pickle.load(handle), dtype=np.float32).squeeze()
 
-                if tool_poses.ndim != 2 or tool_poses.shape[0] < 2:
+                if tool_poses.ndim != 3 or tool_poses.shape[0] < 2:
                     continue
 
                 instruction = self._load_instruction(seq_path)
