@@ -9,8 +9,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 
-class Stage1Dataset(Dataset):
-    """Dataset for stage 1 sequence-to-target pose prediction."""
+class BaseStage1Dataset(Dataset):
+    """Base dataset for stage 1 pose prediction tasks."""
 
     def __init__(
         self,
@@ -51,7 +51,6 @@ class Stage1Dataset(Dataset):
 
     def _build_index(self) -> None:
         for task_dir in sorted(os.listdir(self.root_dir)):
-            # breakpoint()
             task_path = os.path.join(self.root_dir, task_dir)
             if not os.path.isdir(task_path):
                 continue
@@ -71,25 +70,15 @@ class Stage1Dataset(Dataset):
                 if tool_poses.shape[0] < 2:
                     continue
 
-                instruction = self._load_instruction(seq_path)
-                target_pose = tool_poses[-1]
-                num_source_frames = tool_poses.shape[0] - 1
+                self._build_sequence_samples(seq_path, rgb_dir, tool_poses)
 
-                for frame_idx in range(num_source_frames):
-                    image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
-                    if not os.path.isfile(image_path):
-                        continue
-
-                    self.samples.append(
-                        {
-                            "image_path": image_path,
-                            "current_tool_pose": tool_poses[frame_idx].reshape(-1).copy(),
-                            "target_pose": target_pose.reshape(-1).copy(),
-                            "instruction": instruction,
-                            "sequence_path": seq_path,
-                            "frame_idx": frame_idx,
-                        }
-                    )
+    def _build_sequence_samples(
+        self,
+        seq_path: str,
+        rgb_dir: str,
+        tool_poses: np.ndarray,
+    ) -> None:
+        raise NotImplementedError
 
     def _load_instruction(self, seq_path: str) -> str:
         candidates = [
@@ -123,6 +112,65 @@ class Stage1Dataset(Dataset):
             "instruction": sample["instruction"],
             "target_pose": torch.from_numpy(sample["target_pose"]).float(),
         }
+
+
+class Stage1Dataset(BaseStage1Dataset):
+    """Dataset for stage 1 next-pose prediction."""
+
+    def _build_sequence_samples(
+        self,
+        seq_path: str,
+        rgb_dir: str,
+        tool_poses: np.ndarray,
+    ) -> None:
+        instruction = self._load_instruction(seq_path)
+        num_source_frames = tool_poses.shape[0] - 1
+
+        for frame_idx in range(num_source_frames):
+            image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
+            if not os.path.isfile(image_path):
+                continue
+
+            self.samples.append(
+                {
+                    "image_path": image_path,
+                    "current_tool_pose": tool_poses[frame_idx].reshape(-1).copy(),
+                    "target_pose": tool_poses[frame_idx + 1].reshape(-1).copy(),
+                    "instruction": instruction,
+                    "sequence_path": seq_path,
+                    "frame_idx": frame_idx,
+                }
+            )
+
+
+class Stage1TargetPoseDataset(BaseStage1Dataset):
+    """Dataset for stage 1 final-target pose prediction."""
+
+    def _build_sequence_samples(
+        self,
+        seq_path: str,
+        rgb_dir: str,
+        tool_poses: np.ndarray,
+    ) -> None:
+        instruction = self._load_instruction(seq_path)
+        target_pose = tool_poses[-1].reshape(-1).copy()
+        num_source_frames = tool_poses.shape[0] - 1
+
+        for frame_idx in range(num_source_frames):
+            image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
+            if not os.path.isfile(image_path):
+                continue
+
+            self.samples.append(
+                {
+                    "image_path": image_path,
+                    "current_tool_pose": tool_poses[frame_idx].reshape(-1).copy(),
+                    "target_pose": target_pose,
+                    "instruction": instruction,
+                    "sequence_path": seq_path,
+                    "frame_idx": frame_idx,
+                }
+            )
 
 
 if __name__ == "__main__":
