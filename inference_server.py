@@ -3,7 +3,6 @@ import numpy as np
 from pathlib import Path
 from omegaconf import OmegaConf
 from lightning import LightningModule
-from policy.dp2_dino import DP2
 
 if not OmegaConf.has_resolver("eval"):
     OmegaConf.register_new_resolver("eval", eval)
@@ -23,26 +22,58 @@ class DP2InferenceEngine:
         self.model: LightningModule = hydra.utils.instantiate(self.cfg.policy)
         self.model.load_state_dict(payload['state_dict'])
         self.model.to(self.device).eval()
+        self.rgb_keys = [
+            key
+            for key, attr in self.cfg.shape_meta.obs.items()
+            if attr.get("type", "low_dim") == "rgb"
+        ]
+        self.low_dim_keys = [
+            key
+            for key, attr in self.cfg.shape_meta.obs.items()
+            if attr.get("type", "low_dim") == "low_dim"
+        ]
         
         print("--- RTX 5090: Warming Up ---")
         self.warmup()
 
     @torch.no_grad()
     def warmup(self):
-        d_rgb = torch.randn(1, 3, 3, 224, 384).to(self.device)
-        d_qpos = torch.randn(1, 3, 7).to(self.device)
+        warmup_obs = {}
+        for key in self.rgb_keys:
+            shape = tuple(self.cfg.shape_meta.obs[key].shape)
+            warmup_obs[key] = torch.randn(1, 3, *shape).to(self.device)
+        for key in self.low_dim_keys:
+            shape = tuple(self.cfg.shape_meta.obs[key].shape)
+            warmup_obs[key] = torch.randn(1, 3, *shape).to(self.device)
         for _ in range(5): 
-            _ = self.model.predict_action({'cam_front': d_rgb, 'qpos': d_qpos})
+            _ = self.model.predict_action(warmup_obs)
         torch.cuda.synchronize()
 
     @torch.no_grad()
     def infer(self, obs_dict):
         try:
-            img_tensors = [torch.from_numpy(cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), (384, 224))).permute(2, 0, 1).float() / 255.0 for img in obs_dict['cam_front']]
-            rgb = torch.stack(img_tensors).unsqueeze(0).to(self.device)
-            qpos = torch.from_numpy(np.array(obs_dict['qpos'])).float().unsqueeze(0).to(self.device)
+            model_obs = {}
+            for key in self.rgb_keys:
+                if key not in obs_dict:
+                    continue
+                _, height, width = tuple(self.cfg.shape_meta.obs[key].shape)
+                img_tensors = [
+                    torch.from_numpy(
+                        cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), (width, height))
+                    ).permute(2, 0, 1).float() / 255.0
+                    for img in obs_dict[key]
+                ]
+                model_obs[key] = torch.stack(img_tensors).unsqueeze(0).to(self.device)
+            for key in self.low_dim_keys:
+                if key not in obs_dict:
+                    continue
+                model_obs[key] = torch.from_numpy(np.array(obs_dict[key])).float().unsqueeze(0).to(self.device)
 
-            out = self.model.predict_action({'cam_front': rgb, 'qpos': qpos})
+            for passthrough_key in ["instruction", "object_prompt", "initial_object_pose", "object_pose", "pose"]:
+                if passthrough_key in obs_dict:
+                    model_obs[passthrough_key] = obs_dict[passthrough_key]
+
+            out = self.model.predict_action(model_obs)
             torch.cuda.synchronize() 
             
             actions = out['action'] if isinstance(out, dict) else out
@@ -81,7 +112,15 @@ def main():
                 while len(buffer) < msg_size: buffer += conn.recv(65536)
                 data = pickle.loads(buffer[:msg_size]); buffer = buffer[msg_size:]
 
-                obs = {'cam_front': [cv2.imdecode(i, 1) for i in data['img_history']], 'qpos': data['qpos_history']}
+                obs = {}
+                image_history = [cv2.imdecode(i, 1) for i in data['img_history']]
+                if len(engine.rgb_keys) > 0:
+                    obs[engine.rgb_keys[0]] = image_history
+                if 'qpos_history' in data and 'qpos' in engine.low_dim_keys:
+                    obs['qpos'] = data['qpos_history']
+                for passthrough_key in ["instruction", "object_prompt", "initial_object_pose", "object_pose", "pose"]:
+                    if passthrough_key in data:
+                        obs[passthrough_key] = data[passthrough_key]
                 action = engine.infer(obs)
                 if action is None: break 
                 
