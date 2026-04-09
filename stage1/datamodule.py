@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from stage1.dataset import Stage1Dataset
+from stage1.dataset import Stage1Dataset, Stage1DeltaPoseDataset, Stage1TargetPoseDataset
 
 
 class Stage1DataModule(pl.LightningDataModule):
@@ -17,6 +17,7 @@ class Stage1DataModule(pl.LightningDataModule):
         seed: int = 42,
         prefetch_factor: int = 4,
         persistent_workers: bool = True,
+        prediction_target: str = "next_pose",
     ) -> None:
         super().__init__()
         self.data_path = data_path
@@ -26,15 +27,32 @@ class Stage1DataModule(pl.LightningDataModule):
         self.seed = seed
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers and num_workers > 0
+        self.prediction_target = prediction_target
         self.train_dataset: Optional[torch.utils.data.Dataset] = None
         self.val_dataset: Optional[torch.utils.data.Dataset] = None
         self.test_dataset: Optional[torch.utils.data.Dataset] = None
+
+    def _build_dataset(self) -> torch.utils.data.Dataset:
+        dataset_map = {
+            "next_pose": Stage1Dataset,
+            "target_pose": Stage1TargetPoseDataset,
+            "delta_pose": Stage1DeltaPoseDataset,
+        }
+        try:
+            dataset_cls = dataset_map[self.prediction_target]
+        except KeyError as exc:
+            valid_targets = ", ".join(sorted(dataset_map))
+            raise ValueError(
+                f"Unsupported prediction_target '{self.prediction_target}'. "
+                f"Expected one of: {valid_targets}."
+            ) from exc
+        return dataset_cls(root_dir=self.data_path)
 
     def setup(self, stage: Optional[str] = None) -> None:
         if self.train_dataset is not None and self.val_dataset is not None:
             return
 
-        full_dataset = Stage1Dataset(root_dir=self.data_path)
+        full_dataset = self._build_dataset()
         if len(full_dataset) == 0:
             raise RuntimeError(f"No valid samples were found under {self.data_path}.")
 

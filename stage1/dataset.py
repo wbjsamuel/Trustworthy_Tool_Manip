@@ -9,6 +9,37 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 
+def flatten_pose_matrix(pose: np.ndarray) -> np.ndarray:
+    pose = np.asarray(pose, dtype=np.float32)
+    if pose.shape != (4, 4):
+        raise ValueError(f"Expected pose matrix with shape (4, 4), got {pose.shape}")
+    return pose.reshape(-1).copy()
+
+
+def compute_delta_pose(current_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray:
+    current_pose = np.asarray(current_pose, dtype=np.float32)
+    target_pose = np.asarray(target_pose, dtype=np.float32)
+    if current_pose.shape != (4, 4) or target_pose.shape != (4, 4):
+        raise ValueError(
+            "Expected current_pose and target_pose to both have shape (4, 4), "
+            f"got {current_pose.shape} and {target_pose.shape}"
+        )
+    delta_pose = np.linalg.inv(current_pose) @ target_pose
+    return delta_pose.astype(np.float32, copy=False)
+
+
+def apply_delta_pose(current_pose: np.ndarray, delta_pose: np.ndarray) -> np.ndarray:
+    current_pose = np.asarray(current_pose, dtype=np.float32)
+    delta_pose = np.asarray(delta_pose, dtype=np.float32)
+    if current_pose.shape != (4, 4) or delta_pose.shape != (4, 4):
+        raise ValueError(
+            "Expected current_pose and delta_pose to both have shape (4, 4), "
+            f"got {current_pose.shape} and {delta_pose.shape}"
+        )
+    next_pose = current_pose @ delta_pose
+    return next_pose.astype(np.float32, copy=False)
+
+
 class BaseStage1Dataset(Dataset):
     """Base dataset for stage 1 pose prediction tasks."""
 
@@ -134,8 +165,8 @@ class Stage1Dataset(BaseStage1Dataset):
             self.samples.append(
                 {
                     "image_path": image_path,
-                    "current_tool_pose": tool_poses[frame_idx].reshape(-1).copy(),
-                    "target_pose": tool_poses[frame_idx + 1].reshape(-1).copy(),
+                    "current_tool_pose": flatten_pose_matrix(tool_poses[frame_idx]),
+                    "target_pose": flatten_pose_matrix(tool_poses[frame_idx + 1]),
                     "instruction": instruction,
                     "sequence_path": seq_path,
                     "frame_idx": frame_idx,
@@ -153,7 +184,7 @@ class Stage1TargetPoseDataset(BaseStage1Dataset):
         tool_poses: np.ndarray,
     ) -> None:
         instruction = self._load_instruction(seq_path)
-        target_pose = tool_poses[-1].reshape(-1).copy()
+        target_pose = flatten_pose_matrix(tool_poses[-1])
         num_source_frames = tool_poses.shape[0] - 1
 
         for frame_idx in range(num_source_frames):
@@ -164,8 +195,40 @@ class Stage1TargetPoseDataset(BaseStage1Dataset):
             self.samples.append(
                 {
                     "image_path": image_path,
-                    "current_tool_pose": tool_poses[frame_idx].reshape(-1).copy(),
+                    "current_tool_pose": flatten_pose_matrix(tool_poses[frame_idx]),
                     "target_pose": target_pose,
+                    "instruction": instruction,
+                    "sequence_path": seq_path,
+                    "frame_idx": frame_idx,
+                }
+            )
+
+
+class Stage1DeltaPoseDataset(BaseStage1Dataset):
+    """Dataset for stage 1 relative next-pose prediction."""
+
+    def _build_sequence_samples(
+        self,
+        seq_path: str,
+        rgb_dir: str,
+        tool_poses: np.ndarray,
+    ) -> None:
+        instruction = self._load_instruction(seq_path)
+        num_source_frames = tool_poses.shape[0] - 1
+
+        for frame_idx in range(num_source_frames):
+            image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
+            if not os.path.isfile(image_path):
+                continue
+
+            current_pose = tool_poses[frame_idx]
+            next_pose = tool_poses[frame_idx + 1]
+            delta_pose = compute_delta_pose(current_pose, next_pose)
+            self.samples.append(
+                {
+                    "image_path": image_path,
+                    "current_tool_pose": flatten_pose_matrix(current_pose),
+                    "target_pose": flatten_pose_matrix(delta_pose),
                     "instruction": instruction,
                     "sequence_path": seq_path,
                     "frame_idx": frame_idx,

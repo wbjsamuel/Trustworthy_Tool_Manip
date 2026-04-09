@@ -49,6 +49,7 @@ def main() -> None:
         seed=config["training"].get("seed", 42),
         prefetch_factor=config["training"].get("prefetch_factor", 4),
         persistent_workers=config["training"].get("persistent_workers", True),
+        prediction_target=config["data"].get("prediction_target", "next_pose"),
     )
 
     model = Stage1Transformer(

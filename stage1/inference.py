@@ -7,6 +7,7 @@ import torchvision.transforms as transforms
 import yaml
 from PIL import Image
 
+from stage1.dataset import apply_delta_pose
 from stage1.model.stage1_transformer import Stage1Transformer
 
 
@@ -19,6 +20,19 @@ def preprocess_tool_pose(current_tool_pose: Iterable[float]) -> np.ndarray:
     raise ValueError(
         f"Expected current_tool_pose to be a 4x4 matrix or flattened 16-vector, got shape {pose.shape}"
     )
+
+
+def postprocess_prediction(
+    prediction: np.ndarray,
+    current_tool_pose: np.ndarray,
+    prediction_target: str,
+) -> np.ndarray:
+    prediction = np.asarray(prediction, dtype=np.float32).reshape(-1)
+    if prediction_target == "delta_pose":
+        current_pose_matrix = current_tool_pose.reshape(4, 4)
+        delta_pose_matrix = prediction.reshape(4, 4)
+        return apply_delta_pose(current_pose_matrix, delta_pose_matrix).reshape(-1)
+    return prediction
 
 
 def load_config() -> dict:
@@ -72,12 +86,20 @@ def infer(image_path: str, instruction: str, current_tool_pose: Iterable[float])
 
     image = Image.open(image_path).convert("RGB")
     image_tensor = transform(image).unsqueeze(0).to(device)
-    pose_tensor = torch.from_numpy(preprocess_tool_pose(current_tool_pose)).unsqueeze(0).to(device)
+    current_pose = preprocess_tool_pose(current_tool_pose)
+    pose_tensor = torch.from_numpy(current_pose).unsqueeze(0).to(device)
 
     with torch.no_grad():
         predicted_pose = model(image_tensor, pose_tensor, [instruction])
 
-    return predicted_pose.cpu().numpy()
+    prediction_target = config.get("data", {}).get("prediction_target", "next_pose")
+    predicted_pose_np = predicted_pose.cpu().numpy()
+    predicted_pose_np[0] = postprocess_prediction(
+        predicted_pose_np[0],
+        current_pose,
+        prediction_target,
+    )
+    return predicted_pose_np
 
 
 if __name__ == "__main__":
