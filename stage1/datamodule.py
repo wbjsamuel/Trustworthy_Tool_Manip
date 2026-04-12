@@ -17,6 +17,7 @@ class Stage1DataModule(pl.LightningDataModule):
         seed: int = 42,
         prefetch_factor: int = 4,
         persistent_workers: bool = True,
+        pin_memory: bool = False,
         prediction_target: str = "next_pose",
     ) -> None:
         super().__init__()
@@ -27,10 +28,23 @@ class Stage1DataModule(pl.LightningDataModule):
         self.seed = seed
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers and num_workers > 0
+        self.pin_memory = pin_memory
         self.prediction_target = prediction_target
         self.train_dataset: Optional[torch.utils.data.Dataset] = None
         self.val_dataset: Optional[torch.utils.data.Dataset] = None
         self.test_dataset: Optional[torch.utils.data.Dataset] = None
+
+    def _dataloader_kwargs(self, shuffle: bool) -> dict:
+        kwargs = {
+            "batch_size": self.batch_size,
+            "shuffle": shuffle,
+            "num_workers": self.num_workers,
+            "pin_memory": self.pin_memory,
+            "persistent_workers": self.persistent_workers,
+        }
+        if self.num_workers > 0:
+            kwargs["prefetch_factor"] = self.prefetch_factor
+        return kwargs
 
     def _build_dataset(self) -> torch.utils.data.Dataset:
         dataset_map = {
@@ -73,34 +87,10 @@ class Stage1DataModule(pl.LightningDataModule):
         self.test_dataset = self.val_dataset
 
     def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=self.persistent_workers,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
-        )
+        return DataLoader(self.train_dataset, **self._dataloader_kwargs(shuffle=True))
 
     def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=self.persistent_workers,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
-        )
+        return DataLoader(self.val_dataset, **self._dataloader_kwargs(shuffle=False))
 
     def test_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=self.persistent_workers,
-            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
-        )
+        return DataLoader(self.test_dataset, **self._dataloader_kwargs(shuffle=False))

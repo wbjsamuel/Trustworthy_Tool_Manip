@@ -81,6 +81,10 @@ def build_checkpoint_dir(config: dict) -> Path:
 
 def main() -> None:
     config = load_config()
+    sharing_strategy = config["training"].get("sharing_strategy")
+    if sharing_strategy:
+        torch.multiprocessing.set_sharing_strategy(sharing_strategy)
+
     torch.set_float32_matmul_precision(config["training"].get("matmul_precision", "high"))
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = config["training"].get("cudnn_benchmark", True)
@@ -93,6 +97,7 @@ def main() -> None:
         seed=config["training"].get("seed", 42),
         prefetch_factor=config["training"].get("prefetch_factor", 4),
         persistent_workers=config["training"].get("persistent_workers", True),
+        pin_memory=config["training"].get("pin_memory", False),
         prediction_target=config["data"].get("prediction_target", "next_pose"),
     )
 
