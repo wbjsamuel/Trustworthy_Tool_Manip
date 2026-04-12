@@ -21,9 +21,9 @@ model:
   freeze_backbones: true
 
 training:
-  batch_size: 32
+  batch_size: 64
   epochs: 100
-  learning_rate: 0.0002
+  learning_rate: 0.0003
   weight_decay: 0.0001
   lr_scheduler: cosine  # options: constant, cosine
   lr_warmup_steps: 500
@@ -31,7 +31,7 @@ training:
   num_nodes: 1
   strategy: auto
   sync_batchnorm: false
-  num_workers: 12
+  num_workers: 16
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true
@@ -49,7 +49,7 @@ training:
     - model.num_heads
   accumulate_grad_batches: 1
   gradient_clip_val: 1.0
-  precision: 16-mixed
+  precision: 32
   matmul_precision: high
   cudnn_benchmark: true
   check_val_every_n_epoch: 5
