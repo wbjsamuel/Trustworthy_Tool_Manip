@@ -24,22 +24,22 @@ model:
 training:
   batch_size: 128
   epochs: 100
-  learning_rate: 0.0003
+  learning_rate: 0.04
   weight_decay: 0.0001
   lr_scheduler: cosine  # options: constant, cosine
-  lr_warmup_steps: 500
+  lr_warmup_steps: 5000
   devices: 1
   num_nodes: 1
   strategy: auto
   sync_batchnorm: false
-  num_workers: 24
+  num_workers: 16
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true
   sharing_strategy: file_system
   seed: 42
   deterministic: false
-  log_every_n_steps: 10
+  log_every_n_steps: 5
   checkpoint_dir: checkpoints/stage1_4090
   checkpoint_name_params:
     - data.prediction_target
@@ -49,11 +49,11 @@ training:
     - model.num_layers
     - model.num_heads
   accumulate_grad_batches: 1
-  gradient_clip_val: 1.0
+  gradient_clip_val: 5.0
   precision: 32
   matmul_precision: high
   cudnn_benchmark: true
-  check_val_every_n_epoch: 5
+  check_val_every_n_epoch: 10
 
 logging:
   use_wandb: true

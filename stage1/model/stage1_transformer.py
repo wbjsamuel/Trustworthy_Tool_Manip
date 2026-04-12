@@ -35,6 +35,19 @@ class ImageEncoder(nn.Module):
         self.dinov2 = torch.hub.load(dino_repo, dino_model_name, pretrained=True)
         self.siglip_processor = AutoProcessor.from_pretrained(siglip_model_name)
         self.siglip = SiglipVisionModel.from_pretrained(siglip_model_name)
+        image_processor = self.siglip_processor.image_processor
+        siglip_mean = getattr(image_processor, "image_mean", [0.5, 0.5, 0.5])
+        siglip_std = getattr(image_processor, "image_std", [0.5, 0.5, 0.5])
+        self.register_buffer(
+            "siglip_mean",
+            torch.tensor(siglip_mean, dtype=torch.float32).view(1, -1, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "siglip_std",
+            torch.tensor(siglip_std, dtype=torch.float32).view(1, -1, 1, 1),
+            persistent=False,
+        )
 
         if freeze_backbones:
             self.dinov2.requires_grad_(False)
@@ -48,15 +61,10 @@ class ImageEncoder(nn.Module):
         return dino_features["x_norm_patchtokens"].mean(dim=1)
 
     def _encode_siglip(self, image: torch.Tensor) -> torch.Tensor:
-        # The processor handles model-specific normalization. We skip resize/rescale
-        # because the dataset already emits 224x224 tensors in [0, 1].
-        processor_inputs = self.siglip_processor(
-            images=[img.detach().cpu() for img in image],
-            return_tensors="pt",
-            do_resize=False,
-            do_rescale=False,
-        )
-        pixel_values = processor_inputs["pixel_values"].to(image.device)
+        # The dataset already emits 224x224 RGB tensors in [0, 1], so the
+        # remaining processor work is just channel normalization. Doing that
+        # directly on-device avoids a CPU round-trip for every batch.
+        pixel_values = (image - self.siglip_mean) / self.siglip_std
         siglip_outputs = self.siglip(pixel_values=pixel_values)
         return siglip_outputs.pooler_output
 
