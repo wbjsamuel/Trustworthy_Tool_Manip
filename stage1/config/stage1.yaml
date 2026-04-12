@@ -38,6 +38,13 @@ training:
   deterministic: false
   log_every_n_steps: 10
   checkpoint_dir: checkpoints/stage1
+  checkpoint_name_params:
+    - data.prediction_target
+    - training.batch_size
+    - training.learning_rate
+    - model.embed_dim
+    - model.num_layers
+    - model.num_heads
   precision: 32
   matmul_precision: high
   cudnn_benchmark: true

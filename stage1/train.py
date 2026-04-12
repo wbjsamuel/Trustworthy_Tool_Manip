@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,37 @@ def resolve_devices(devices: Any) -> Any:
     return devices
 
 
+def get_config_value(config: dict, key_path: str) -> Any:
+    value: Any = config
+    for key in key_path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            raise KeyError(f"Missing config key: {key_path}")
+        value = value[key]
+    return value
+
+
+def sanitize_name_component(value: Any) -> str:
+    text = str(value).strip().replace("/", "-")
+    sanitized = "".join(character if character.isalnum() or character in {"-", "_", "."} else "-" for character in text)
+    while "--" in sanitized:
+        sanitized = sanitized.replace("--", "-")
+    return sanitized.strip("-") or "unknown"
+
+
+def build_checkpoint_dir(config: dict) -> Path:
+    training_config = config["training"]
+    base_dir = Path(training_config.get("checkpoint_dir", "checkpoints/stage1"))
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    name_components = [timestamp]
+    for key_path in training_config.get("checkpoint_name_params", []):
+        key_name = key_path.split(".")[-1]
+        key_value = get_config_value(config, key_path)
+        name_components.append(f"{key_name}-{sanitize_name_component(key_value)}")
+
+    return base_dir / "_".join(name_components)
+
+
 def main() -> None:
     config = load_config()
     torch.set_float32_matmul_precision(config["training"].get("matmul_precision", "high"))
@@ -84,7 +116,7 @@ def main() -> None:
         freeze_backbones=config["model"].get("freeze_backbones", True),
     )
 
-    checkpoint_dir = Path(config["training"].get("checkpoint_dir", "checkpoints/stage1"))
+    checkpoint_dir = build_checkpoint_dir(config)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks = [
