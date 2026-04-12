@@ -1,4 +1,5 @@
-from typing import List
+import time
+from typing import Any, List, Optional
 
 import pytorch_lightning as pl
 import torch
@@ -168,6 +169,8 @@ class Stage1Transformer(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
+        self._last_train_step_start_time: Optional[float] = None
+        self._cumulative_estimated_flops: float = 0.0
 
         dino_feature_dim = image_feature_dim // 2
         siglip_feature_dim = image_feature_dim - dino_feature_dim
@@ -216,6 +219,46 @@ class Stage1Transformer(pl.LightningModule):
         )
         self.criterion = nn.MSELoss()
 
+    def _linear_flops(self, in_features: int, out_features: int, batch_tokens: int) -> int:
+        return 2 * batch_tokens * in_features * out_features
+
+    def _transformer_layer_flops(self, seq_len: int) -> int:
+        embed_dim = int(self.hparams.embed_dim)
+        ff_dim = embed_dim * int(self.hparams.feedforward_mult)
+
+        attention_qkv = 3 * self._linear_flops(embed_dim, embed_dim, seq_len)
+        attention_scores = 2 * int(self.hparams.num_heads) * seq_len * seq_len * (embed_dim // int(self.hparams.num_heads))
+        attention_reduce = 2 * int(self.hparams.num_heads) * seq_len * seq_len * (embed_dim // int(self.hparams.num_heads))
+        attention_out = self._linear_flops(embed_dim, embed_dim, seq_len)
+        ffn = self._linear_flops(embed_dim, ff_dim, seq_len) + self._linear_flops(ff_dim, embed_dim, seq_len)
+        return attention_qkv + attention_scores + attention_reduce + attention_out + ffn
+
+    def estimate_forward_flops(self, batch_size: int) -> int:
+        embed_dim = int(self.hparams.embed_dim)
+        seq_len = int(self.hparams.num_fusion_tokens) + 3
+        image_proj = self._linear_flops(int(self.hparams.image_feature_dim), embed_dim, batch_size)
+        language_proj = self._linear_flops(int(self.hparams.language_feature_dim), embed_dim, batch_size)
+        pose_proj = (
+            self._linear_flops(int(self.hparams.pose_dim), embed_dim, batch_size)
+            + self._linear_flops(embed_dim, embed_dim, batch_size)
+        )
+        transformer = batch_size * int(self.hparams.num_layers) * self._transformer_layer_flops(seq_len)
+        output_head = (
+            self._linear_flops(embed_dim, embed_dim, batch_size)
+            + self._linear_flops(embed_dim, embed_dim, batch_size)
+            + self._linear_flops(embed_dim, int(self.hparams.pose_dim), batch_size)
+        )
+        return image_proj + language_proj + pose_proj + transformer + output_head
+
+    def floating_point_ops(self, batch: Optional[dict[str, Any]] = None) -> int:
+        if batch is None:
+            batch_size = 1
+        elif isinstance(batch, dict) and "image" in batch:
+            batch_size = int(batch["image"].shape[0])
+        else:
+            batch_size = 1
+        return self.estimate_forward_flops(batch_size)
+
     def forward(
         self,
         image: torch.Tensor,
@@ -259,7 +302,58 @@ class Stage1Transformer(pl.LightningModule):
         return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(batch, "train")
+        self._last_train_step_start_time = time.perf_counter()
+        loss = self._shared_step(batch, "train")
+
+        batch_size = int(batch["image"].size(0))
+        estimated_forward_flops = float(self.estimate_forward_flops(batch_size))
+        estimated_train_step_flops = estimated_forward_flops * 3.0
+        self._cumulative_estimated_flops += estimated_train_step_flops
+
+        self.log(
+            "train_estimated_fusion_flops",
+            estimated_train_step_flops,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train_cumulative_estimated_fusion_flops",
+            self._cumulative_estimated_flops,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=True,
+            batch_size=batch_size,
+        )
+        return loss
+
+    def on_train_batch_end(self, outputs, batch: dict, batch_idx: int) -> None:
+        if self._last_train_step_start_time is None:
+            return
+
+        elapsed = max(time.perf_counter() - self._last_train_step_start_time, 1e-6)
+        batch_size = int(batch["image"].size(0))
+        self.log(
+            "train_step_time",
+            elapsed,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train_samples_per_sec",
+            batch_size / elapsed,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=True,
+            batch_size=batch_size,
+        )
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         return self._shared_step(batch, "val")
