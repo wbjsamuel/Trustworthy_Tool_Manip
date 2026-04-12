@@ -6,6 +6,8 @@ import torch.nn as nn
 from torchvision import transforms
 from transformers import AutoProcessor, AutoTokenizer, SiglipVisionModel, T5EncoderModel
 
+from model.common.lr_scheduler import get_scheduler
+
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
@@ -131,6 +133,8 @@ class Stage1Transformer(pl.LightningModule):
         num_fusion_tokens: int = 32,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-4,
+        lr_scheduler: str = "constant",
+        lr_warmup_steps: int = 0,
         dino_repo: str = "facebookresearch/dinov2",
         dino_model_name: str = "dinov2_vitb14_reg",
         siglip_model_name: str = "google/siglip-base-patch16-224",
@@ -238,10 +242,34 @@ class Stage1Transformer(pl.LightningModule):
         return self._shared_step(batch, "test")
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
+        )
+        scheduler_name = self.hparams.lr_scheduler.lower()
+        if scheduler_name == "constant":
+            return optimizer
+
+        if scheduler_name == "cosine":
+            scheduler = get_scheduler(
+                name="cosine",
+                optimizer=optimizer,
+                num_warmup_steps=self.hparams.lr_warmup_steps,
+                num_training_steps=self.trainer.estimated_stepping_batches,
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                },
+            }
+
+        raise ValueError(
+            f"Unsupported lr_scheduler '{self.hparams.lr_scheduler}'. "
+            "Expected 'constant' or 'cosine'."
         )
 
 

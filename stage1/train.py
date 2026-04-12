@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytorch_lightning as pl
 import torch
@@ -35,6 +36,17 @@ def build_logger(config: dict):
     return CSVLogger(save_dir=save_dir, name=logging_config.get("run_name", "stage1"))
 
 
+def resolve_devices(devices: Any) -> Any:
+    if isinstance(devices, str):
+        stripped = devices.strip()
+        if stripped.lower() == "auto":
+            return stripped
+        if "," in stripped:
+            return [int(device_id.strip()) for device_id in stripped.split(",") if device_id.strip()]
+        return int(stripped)
+    return devices
+
+
 def main() -> None:
     config = load_config()
     torch.set_float32_matmul_precision(config["training"].get("matmul_precision", "high"))
@@ -63,6 +75,8 @@ def main() -> None:
         pose_dim=config["model"]["pose_dim"],
         learning_rate=config["training"]["learning_rate"],
         weight_decay=config["training"].get("weight_decay", 1e-4),
+        lr_scheduler=config["training"].get("lr_scheduler", "constant"),
+        lr_warmup_steps=config["training"].get("lr_warmup_steps", 0),
         dino_repo=config["model"].get("dino_repo", "facebookresearch/dinov2"),
         dino_model_name=config["model"].get("dino_model_name", "dinov2_vitb14_reg"),
         siglip_model_name=config["model"].get("siglip_model_name", "google/siglip-base-patch16-224"),
@@ -85,16 +99,29 @@ def main() -> None:
         LearningRateMonitor(logging_interval="epoch"),
     ]
 
+    training_config = config["training"]
+    trainer_devices = resolve_devices(training_config.get("devices", 1))
+    is_multi_device = trainer_devices == "auto" or (
+        isinstance(trainer_devices, int) and trainer_devices > 1
+    ) or (isinstance(trainer_devices, (list, tuple)) and len(trainer_devices) > 1)
+
+    trainer_strategy = training_config.get("strategy", "auto")
+    if trainer_strategy == "auto" and is_multi_device and torch.cuda.is_available():
+        trainer_strategy = "ddp"
+
     trainer = pl.Trainer(
-        max_epochs=config["training"]["epochs"],
+        max_epochs=training_config["epochs"],
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
+        devices=trainer_devices,
+        num_nodes=training_config.get("num_nodes", 1),
+        strategy=trainer_strategy,
+        sync_batchnorm=training_config.get("sync_batchnorm", False),
         logger=build_logger(config),
         callbacks=callbacks,
-        deterministic=config["training"].get("deterministic", True),
-        log_every_n_steps=config["training"].get("log_every_n_steps", 10),
-        precision=config["training"].get("precision", "bf16-mixed"),
-        check_val_every_n_epoch=config["training"].get("check_val_every_n_epoch", 5),
+        deterministic=training_config.get("deterministic", True),
+        log_every_n_steps=training_config.get("log_every_n_steps", 10),
+        precision=training_config.get("precision", "bf16-mixed"),
+        check_val_every_n_epoch=training_config.get("check_val_every_n_epoch", 5),
     )
 
     trainer.fit(model, datamodule=dm)
