@@ -38,7 +38,7 @@ policy:
 
   stage1_pose_conditioner:
     _target_: model.pose.stage1_pose_conditioner.Stage1PoseConditioner
-    checkpoint_path: checkpoints/stage1/last.ckpt
+    checkpoint_path: checkpoints/stage1
     config_path: stage1/config/stage1.yaml
     camera_key: null
     pose_dim: 16

@@ -1,13 +1,14 @@
+import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytorch_lightning as pl
 import torch
-import yaml
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
+from stage1.config_utils import build_stage1_model_kwargs, load_stage1_config
 from stage1.datamodule import Stage1DataModule
 from stage1.model.stage1_transformer import Stage1Transformer
 
@@ -17,9 +18,14 @@ except ImportError:  # pragma: no cover - optional dependency
     WandbLogger = None
 
 
-def load_config() -> dict:
-    with open("stage1/config/stage1.yaml", "r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the Stage 1 model.")
+    parser.add_argument(
+        "--config",
+        default="stage1/config/stage1.yaml",
+        help="Path to a Stage 1 YAML config.",
+    )
+    return parser.parse_args()
 
 
 def build_logger(config: dict):
@@ -69,18 +75,21 @@ def build_checkpoint_dir(config: dict) -> Path:
     training_config = config["training"]
     base_dir = Path(training_config.get("checkpoint_dir", "checkpoints/stage1"))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    date_dir = datetime.now().strftime("%Y%m%d")
 
-    name_components = [timestamp]
+    name_components = []
     for key_path in training_config.get("checkpoint_name_params", []):
         key_name = key_path.split(".")[-1]
         key_value = get_config_value(config, key_path)
         name_components.append(f"{key_name}-{sanitize_name_component(key_value)}")
 
-    return base_dir / "_".join(name_components)
+    run_name = "_".join(name_components + [timestamp])
+    return base_dir / run_name / date_dir
 
 
 def main() -> None:
-    config = load_config()
+    args = parse_args()
+    config = load_stage1_config(args.config)
     sharing_strategy = config["training"].get("sharing_strategy")
     if sharing_strategy:
         torch.multiprocessing.set_sharing_strategy(sharing_strategy)
@@ -101,25 +110,7 @@ def main() -> None:
         prediction_target=config["data"].get("prediction_target", "next_pose"),
     )
 
-    model = Stage1Transformer(
-        embed_dim=config["model"]["embed_dim"],
-        num_heads=config["model"]["num_heads"],
-        num_layers=config["model"]["num_layers"],
-        feedforward_mult=config["model"].get("feedforward_mult", 8),
-        num_fusion_tokens=config["model"].get("num_fusion_tokens", 32),
-        image_feature_dim=config["model"]["image_feature_dim"],
-        language_feature_dim=config["model"]["language_feature_dim"],
-        pose_dim=config["model"]["pose_dim"],
-        learning_rate=config["training"]["learning_rate"],
-        weight_decay=config["training"].get("weight_decay", 1e-4),
-        lr_scheduler=config["training"].get("lr_scheduler", "constant"),
-        lr_warmup_steps=config["training"].get("lr_warmup_steps", 0),
-        dino_repo=config["model"].get("dino_repo", "facebookresearch/dinov2"),
-        dino_model_name=config["model"].get("dino_model_name", "dinov2_vitb14_reg"),
-        siglip_model_name=config["model"].get("siglip_model_name", "google/siglip-base-patch16-224"),
-        text_model_name=config["model"].get("text_model_name", "t5-base"),
-        freeze_backbones=config["model"].get("freeze_backbones", True),
-    )
+    model = Stage1Transformer(**build_stage1_model_kwargs(config))
 
     checkpoint_dir = build_checkpoint_dir(config)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +147,8 @@ def main() -> None:
         logger=build_logger(config),
         callbacks=callbacks,
         deterministic=training_config.get("deterministic", True),
+        accumulate_grad_batches=training_config.get("accumulate_grad_batches", 1),
+        gradient_clip_val=training_config.get("gradient_clip_val", 0.0),
         log_every_n_steps=training_config.get("log_every_n_steps", 10),
         precision=training_config.get("precision", "bf16-mixed"),
         check_val_every_n_epoch=training_config.get("check_val_every_n_epoch", 5),

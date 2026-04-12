@@ -4,12 +4,19 @@ import importlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+import contextlib
 import torch
 import torch.nn as nn
-import yaml
 from PIL import Image
 from torchvision import transforms
 
+from stage1.config_utils import (
+    build_stage1_model_kwargs,
+    load_stage1_config,
+    resolve_torch_dtype,
+    resolve_stage1_checkpoint_path,
+    supports_autocast,
+)
 from stage1.model.stage1_transformer import Stage1Transformer
 
 
@@ -346,6 +353,7 @@ class Stage1PoseConditioner(nn.Module):
         self.register_buffer("image_mean", torch.tensor(image_mean, dtype=torch.float32).view(1, -1, 1, 1))
         self.register_buffer("image_std", torch.tensor(image_std, dtype=torch.float32).view(1, -1, 1, 1))
         self.initial_pose_pipeline = initial_pose_pipeline or InitialPosePipeline()
+        self._config: Optional[dict] = None
         self._stage1_model: Optional[Stage1Transformer] = None
 
     def _resolve_config_path(self) -> Path:
@@ -354,36 +362,28 @@ class Stage1PoseConditioner(nn.Module):
         return Path(__file__).resolve().parents[2] / "stage1" / "config" / "stage1.yaml"
 
     def _load_config(self) -> dict:
-        config_path = self._resolve_config_path()
-        with open(config_path, "r", encoding="utf-8") as handle:
-            return yaml.safe_load(handle)
+        if self._config is None:
+            config_path = self._resolve_config_path()
+            self._config = load_stage1_config(str(config_path))
+        return self._config
 
     def _load_stage1_model(self, device: torch.device) -> Stage1Transformer:
         if self._stage1_model is not None:
             return self._stage1_model
 
         config = self._load_config()
+        checkpoint_path = resolve_stage1_checkpoint_path(self.checkpoint_path)
         model = Stage1Transformer.load_from_checkpoint(
-            self.checkpoint_path,
+            str(checkpoint_path),
             map_location=device,
-            embed_dim=config["model"]["embed_dim"],
-            num_heads=config["model"]["num_heads"],
-            num_layers=config["model"]["num_layers"],
-            feedforward_mult=config["model"].get("feedforward_mult", 8),
-            num_fusion_tokens=config["model"].get("num_fusion_tokens", 32),
-            image_feature_dim=config["model"]["image_feature_dim"],
-            language_feature_dim=config["model"]["language_feature_dim"],
-            pose_dim=config["model"]["pose_dim"],
-            learning_rate=config["training"]["learning_rate"],
-            weight_decay=config["training"].get("weight_decay", 1e-4),
-            dino_repo=config["model"].get("dino_repo", "facebookresearch/dinov2"),
-            dino_model_name=config["model"].get("dino_model_name", "dinov2_vitb14_reg"),
-            siglip_model_name=config["model"].get("siglip_model_name", "google/siglip-base-patch16-224"),
-            text_model_name=config["model"].get("text_model_name", "t5-base"),
-            freeze_backbones=config["model"].get("freeze_backbones", True),
+            **build_stage1_model_kwargs(config),
         )
+        inference_dtype = resolve_torch_dtype(config.get("inference", {}).get("model_dtype"))
         model.eval()
-        model.to(device)
+        if inference_dtype is not None and device.type == "cuda":
+            model.to(device=device, dtype=inference_dtype)
+        else:
+            model.to(device)
         model.requires_grad_(False)
         self._stage1_model = model
         return model
@@ -425,16 +425,23 @@ class Stage1PoseConditioner(nn.Module):
         batch_size, time_steps = images.shape[:2]
         steps = min(n_obs_steps, time_steps)
         stage1_model = self._load_stage1_model(device)
+        autocast_dtype = resolve_torch_dtype(self._load_config().get("inference", {}).get("autocast_dtype"))
+        autocast_context = (
+            torch.autocast(device_type=device.type, dtype=autocast_dtype)
+            if supports_autocast(device, autocast_dtype)
+            else contextlib.nullcontext()
+        )
         instructions = self._get_instructions(obs_dict, batch_size)
 
         initial_pose = self.initial_pose_pipeline(obs_dict, images[:, 0]).to(device=device, dtype=torch.float32)
         current_pose = _flatten_pose_tensor(initial_pose, self.pose_dim)
         pose_history = [current_pose]
 
-        for step_idx in range(steps - 1):
-            predicted_pose = stage1_model(images[:, step_idx], current_pose, instructions)
-            current_pose = _flatten_pose_tensor(predicted_pose, self.pose_dim)
-            pose_history.append(current_pose)
+        with autocast_context:
+            for step_idx in range(steps - 1):
+                predicted_pose = stage1_model(images[:, step_idx], current_pose, instructions)
+                current_pose = _flatten_pose_tensor(predicted_pose, self.pose_dim).to(torch.float32)
+                pose_history.append(current_pose)
 
         pose_history_tensor = torch.stack(pose_history, dim=1)
         if pose_history_tensor.shape[1] < n_obs_steps:

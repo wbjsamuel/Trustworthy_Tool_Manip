@@ -1,4 +1,4 @@
-# Configuration for the Stage 1 pose prediction model.
+# Stage 1 config tuned for training on a single RTX 4090.
 
 data:
   path: data/stage1_data/parsed_taco_data
@@ -21,17 +21,17 @@ model:
   freeze_backbones: true
 
 training:
-  batch_size: 48
+  batch_size: 32
   epochs: 100
-  learning_rate: 0.0001
+  learning_rate: 0.0002
   weight_decay: 0.0001
-  lr_scheduler: constant  # options: constant, cosine
-  lr_warmup_steps: 0
-  devices: 1  # set to an integer >1, a list like [0,1], "0,1", or "auto" for multi-GPU
+  lr_scheduler: cosine  # options: constant, cosine
+  lr_warmup_steps: 500
+  devices: 1
   num_nodes: 1
-  strategy: auto  # use "ddp" for multi-GPU training
+  strategy: auto
   sync_batchnorm: false
-  num_workers: 16
+  num_workers: 12
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true
@@ -39,7 +39,7 @@ training:
   seed: 42
   deterministic: false
   log_every_n_steps: 10
-  checkpoint_dir: checkpoints/stage1
+  checkpoint_dir: checkpoints/stage1_4090
   checkpoint_name_params:
     - data.prediction_target
     - training.batch_size
@@ -48,8 +48,8 @@ training:
     - model.num_layers
     - model.num_heads
   accumulate_grad_batches: 1
-  gradient_clip_val: 0.0
-  precision: 32
+  gradient_clip_val: 1.0
+  precision: 16-mixed
   matmul_precision: high
   cudnn_benchmark: true
   check_val_every_n_epoch: 5
@@ -57,12 +57,12 @@ training:
 logging:
   use_wandb: true
   project: trustworthy_tool_manip
-  run_name: stage1_transformer_training
+  run_name: stage1_transformer_4090_single
   save_dir: logs
   mode: online
 
 inference:
-  checkpoint_dir: checkpoints/stage1
+  checkpoint_dir: checkpoints/stage1_4090
   checkpoint_name: last.ckpt
   model_dtype: float32
   autocast_dtype: null
