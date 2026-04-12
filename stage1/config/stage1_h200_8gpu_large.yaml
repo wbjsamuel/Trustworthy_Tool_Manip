@@ -22,6 +22,7 @@ model:
   siglip_model_name: google/siglip-base-patch16-224
   text_model_name: t5-base
   freeze_backbones: true
+  cache_language_embeddings: true
 
 training:
   batch_size: 256
@@ -34,7 +35,7 @@ training:
   num_nodes: 1
   strategy: ddp
   sync_batchnorm: false
-  num_workers: 16
+  num_workers: 32
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true

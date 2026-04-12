@@ -82,19 +82,22 @@ class LanguageEncoder(nn.Module):
         self,
         text_model_name: str = "t5-base",
         freeze_backbone: bool = True,
+        cache_embeddings: bool = True,
     ) -> None:
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(text_model_name)
         self.model = T5EncoderModel.from_pretrained(text_model_name)
         self.freeze_backbone = freeze_backbone
+        self.cache_embeddings = cache_embeddings and freeze_backbone
+        self._embedding_cache: dict[str, torch.Tensor] = {}
 
         if freeze_backbone:
             self.model.requires_grad_(False)
             self.model.eval()
 
-    def forward(self, texts: List[str], device: torch.device) -> torch.Tensor:
+    def _encode_text_batch(self, texts: List[str], device: torch.device) -> torch.Tensor:
         encoded = self.tokenizer(
-            [text if text else "" for text in texts],
+            texts,
             return_tensors="pt",
             padding=True,
             truncation=True,
@@ -112,6 +115,27 @@ class LanguageEncoder(nn.Module):
         masked_hidden = hidden_states * attention_mask
         token_counts = attention_mask.sum(dim=1).clamp(min=1)
         return masked_hidden.sum(dim=1) / token_counts
+
+    def forward(self, texts: List[str], device: torch.device) -> torch.Tensor:
+        normalized_texts = [text if text else "" for text in texts]
+        if not self.cache_embeddings:
+            return self._encode_text_batch(normalized_texts, device)
+
+        missing_texts: List[str] = []
+        for text in normalized_texts:
+            if text not in self._embedding_cache:
+                missing_texts.append(text)
+
+        if missing_texts:
+            unique_missing_texts = list(dict.fromkeys(missing_texts))
+            missing_embeddings = self._encode_text_batch(unique_missing_texts, device)
+            for text, embedding in zip(unique_missing_texts, missing_embeddings):
+                self._embedding_cache[text] = embedding.detach().cpu()
+
+        return torch.stack(
+            [self._embedding_cache[text].to(device=device) for text in normalized_texts],
+            dim=0,
+        )
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -140,6 +164,7 @@ class Stage1Transformer(pl.LightningModule):
         siglip_model_name: str = "google/siglip-base-patch16-224",
         text_model_name: str = "t5-base",
         freeze_backbones: bool = True,
+        cache_language_embeddings: bool = True,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -158,6 +183,7 @@ class Stage1Transformer(pl.LightningModule):
         self.language_encoder = LanguageEncoder(
             text_model_name=text_model_name,
             freeze_backbone=freeze_backbones,
+            cache_embeddings=cache_language_embeddings,
         )
 
         self.image_proj = nn.Linear(image_feature_dim, embed_dim)

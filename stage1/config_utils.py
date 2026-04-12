@@ -64,6 +64,7 @@ def build_stage1_model_kwargs(config: dict) -> dict[str, Any]:
         "siglip_model_name": config["model"].get("siglip_model_name", "google/siglip-base-patch16-224"),
         "text_model_name": config["model"].get("text_model_name", "t5-base"),
         "freeze_backbones": config["model"].get("freeze_backbones", True),
+        "cache_language_embeddings": config["model"].get("cache_language_embeddings", True),
     }
 
 

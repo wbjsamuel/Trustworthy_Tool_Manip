@@ -40,6 +40,41 @@ def apply_delta_pose(current_pose: np.ndarray, delta_pose: np.ndarray) -> np.nda
     return next_pose.astype(np.float32, copy=False)
 
 
+def _format_noun_phrase(text: str, add_article: bool = False) -> str:
+    phrase = text.replace("_", " ").strip()
+    if not phrase:
+        return phrase
+
+    lowered = phrase.lower()
+    if lowered.startswith(("a ", "an ", "the ")):
+        return phrase
+    if add_article:
+        return f"the {phrase}"
+    return phrase
+
+
+def format_task_name_as_instruction(task_name: str) -> str:
+    normalized = task_name.strip().replace("-", "_")
+    if not normalized:
+        return ""
+
+    parts = [part for part in normalized.split("_") if part]
+    if len(parts) >= 3:
+        if parts[0].lower() == "use" and len(parts) >= 4:
+            tool = _format_noun_phrase(parts[1])
+            action = " ".join(parts[2:-1])
+            target = _format_noun_phrase(parts[-1], add_article=True)
+            return f"use {tool} to {action} {target}"
+
+        action = parts[0].replace("_", " ")
+        tool = _format_noun_phrase(parts[1])
+        target = _format_noun_phrase(" ".join(parts[2:]), add_article=True)
+        return f"use {tool} to {action} {target}"
+
+    phrase = normalized.replace("_", " ")
+    return phrase
+
+
 class BaseStage1Dataset(Dataset):
     """Base dataset for stage 1 pose prediction tasks."""
 
@@ -126,7 +161,8 @@ class BaseStage1Dataset(Dataset):
                     text = handle.read().strip()
                 if text:
                     return text
-        return ""
+        task_name = os.path.basename(os.path.dirname(seq_path))
+        return format_task_name_as_instruction(task_name)
 
     def __len__(self) -> int:
         return len(self.samples)
