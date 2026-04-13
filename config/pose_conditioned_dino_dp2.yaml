@@ -1,0 +1,140 @@
+defaults:
+  - _self_
+  - task: default_task
+
+name: ${task.name}
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+
+seed: 42
+
+horizon: 32
+n_obs_steps: 3
+n_action_steps: 32
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+policy:
+  _target_: policy.pose_conditioned_dino_dp2.PoseConditionedDINO_DP2
+
+  shape_meta: ${shape_meta}
+
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 1000
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    prediction_type: epsilon
+
+  obs_encoder:
+    _target_: model.vision.multi_image_obs_encoder_dino.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    weights_path: "weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+
+  stage1_pose_conditioner:
+    _target_: model.pose.stage1_pose_conditioner.Stage1PoseConditioner
+    checkpoint_path: checkpoints/stage1
+    config_path: stage1/config/stage1.yaml
+    camera_key: null
+    pose_dim: 16
+    instruction_key: instruction
+    default_instruction: ""
+    image_is_normalized: True
+    initial_pose_pipeline:
+      _target_: model.pose.stage1_pose_conditioner.InitialPosePipeline
+      default_prompt: object
+      detector:
+        _target_: model.pose.stage1_pose_conditioner.GroundingSAMDetector
+        model_id: null
+      sam3d:
+        _target_: model.pose.stage1_pose_conditioner.SAM3DPointCloudBuilder
+      foundationpose:
+        _target_: model.pose.stage1_pose_conditioner.FoundationPoseEstimator
+        pose_dim: 16
+
+  optimazer_cfg: ${optimizer}
+  scheduler_cfg: ${lr_scheduler}
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_as_global_cond: ${obs_as_global_cond}
+  diffusion_step_embed_dim: 128
+  down_dims: [256, 512, 1024]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: True
+  pose_dim: 16
+  pose_feature_dim: 128
+
+ema:
+  update_after_steps: 0
+
+dataloader:
+  train:
+    batch_size: 32
+    num_workers: 16
+    shuffle: True
+    pin_memory: True
+  val:
+    batch_size: 32
+    num_workers: 16
+    shuffle: False
+    pin_memory: False
+
+optimizer:
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+lr_scheduler:
+  scheduler: cosine
+  warmup_steps: 500
+
+checkpoint:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  monitor: val/loss
+  mode: min
+  save_top_k: 1
+  save_last: True
+  save_weights_only: True
+  every_n_train_steps: null
+  save_on_train_epoch_end: False
+  filename: 'step={step:08d}-loss={val/loss:.4f}'
+  auto_insert_metric_name: False
+
+trainer:
+  max_epochs: 300
+  accelerator: auto
+  devices: auto
+  precision: 32
+  check_val_every_n_epoch: 10
+  enable_progress_bar: True
+
+logging:
+  project: Pose-Conditioned-DP2-DINO
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}
+  tags: ["${task_name}", "stage1_pose_conditioned"]
+  id: null
+  group: null
+
+multi_run:
+  run_dir: outputs/${logging.project}/${now:%Y.%m.%d.%H.%M.%S}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${task_name}
+  run:
+    dir: outputs/${logging.project}/${now:%Y.%m.%d.%H.%M.%S}_${task_name}
+  sweep:
+    dir: outputs/${logging.project}/${now:%Y.%m.%d.%H.%M.%S}_${task_name}
+    subdir: ${hydra.job.num}
