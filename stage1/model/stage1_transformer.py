@@ -298,12 +298,13 @@ class Stage1Transformer(pl.LightningModule):
             batch["image"], batch["current_tool_pose"], batch["instruction"]
         )
         loss = self.criterion(predicted_pose, batch["target_pose"])
+        is_train = stage == "train"
         self.log(
             f"{stage}_loss",
             loss,
-            on_step=(stage == "train"),
-            on_epoch=True,
-            prog_bar=True,
+            on_step=is_train,
+            on_epoch=not is_train,
+            prog_bar=is_train,
             logger=True,
             batch_size=batch["image"].size(0),
         )

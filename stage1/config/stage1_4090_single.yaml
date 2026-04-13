@@ -24,10 +24,10 @@ model:
 training:
   batch_size: 128
   epochs: 100
-  learning_rate: 0.04
+  learning_rate: 0.0002
   weight_decay: 0.0001
-  lr_scheduler: cosine  # options: constant, cosine
-  lr_warmup_steps: 5000
+  lr_scheduler: constant  # options: constant, cosine
+  lr_warmup_steps: 500
   devices: 1
   num_nodes: 1
   strategy: auto
