@@ -60,12 +60,6 @@ def format_task_name_as_instruction(task_name: str) -> str:
 
     parts = [part for part in normalized.split("_") if part]
     if len(parts) >= 3:
-        if parts[0].lower() == "use" and len(parts) >= 4:
-            tool = _format_noun_phrase(parts[1])
-            action = " ".join(parts[2:-1])
-            target = _format_noun_phrase(parts[-1], add_article=True)
-            return f"use {tool} to {action} {target}"
-
         action = parts[0].replace("_", " ")
         tool = _format_noun_phrase(parts[1])
         target = _format_noun_phrase(" ".join(parts[2:]), add_article=True)
