@@ -57,13 +57,13 @@ training:
 
 logging:
   use_wandb: true
-  project: trustworthy_tool_manip
+  project: tool_manip_stage1
   run_name: stage1_transformer_4090_single
   save_dir: logs
   mode: online
 
 inference:
-  checkpoint_dir: checkpoints/stage1_4090
+  checkpoint_dir: checkpoints/stage1_4090_single
   checkpoint_name: last.ckpt
   model_dtype: float32
   autocast_dtype: null
