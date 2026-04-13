@@ -124,7 +124,7 @@ def main() -> None:
             save_last=True,
             save_top_k=1,
         ),
-        LearningRateMonitor(logging_interval="epoch"),
+        LearningRateMonitor(logging_interval="step"),
     ]
 
     training_config = config["training"]
