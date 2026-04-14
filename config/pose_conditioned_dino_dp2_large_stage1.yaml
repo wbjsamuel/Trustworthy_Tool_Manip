@@ -1,0 +1,16 @@
+defaults:
+  - pose_conditioned_dino_dp2
+  - _self_
+
+policy:
+  stage1_pose_conditioner:
+    checkpoint_path: checkpoints/stage1_h200_large
+    config_path: stage1/config/stage1_h200_8gpu_large.yaml
+
+logging:
+  project: Pose-Conditioned-DP2-DINO
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_large_stage1
+  tags: ["${task_name}", "stage1_pose_conditioned", "large_stage1"]
+  id: null
+  group: null
