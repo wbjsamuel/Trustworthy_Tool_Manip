@@ -34,6 +34,8 @@ policy:
   obs_encoder:
     _target_: model.vision.multi_image_obs_encoder_dino.MultiImageObsEncoder
     shape_meta: ${shape_meta}
+    backbone_source: huggingface
+    huggingface_model_name: facebook/dinov2-small
     weights_path: "weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
 
   stage1_pose_conditioner:

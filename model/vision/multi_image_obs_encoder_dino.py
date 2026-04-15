@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 import torch
 import torch.nn as nn
+from transformers import AutoImageProcessor, Dinov2Model
 
 if __name__ == "__main__":
     sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -14,6 +15,8 @@ class MultiImageObsEncoder(nn.Module):
     def __init__(self,
             shape_meta: dict,
             weights_path: str = "weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+            backbone_source: str = "auto",
+            huggingface_model_name: str = "facebook/dinov2-small",
             # weights_path: str = "weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
         ):
         """
@@ -28,9 +31,11 @@ class MultiImageObsEncoder(nn.Module):
         key_model_map = nn.ModuleDict()
 
         # vision backbone
-        resolved_weights = self._resolve_backbone_weights(weights_path)
-        key_model_map['rgb'] = dinov3_vits16(pretrained=True, weights=resolved_weights)
-        # key_model_map['rgb'] = dinov3_vitb16(pretrained=True, weights=weights_path)
+        key_model_map['rgb'] = self._build_rgb_backbone(
+            weights_path=weights_path,
+            backbone_source=backbone_source,
+            huggingface_model_name=huggingface_model_name,
+        )
         key_model_map['rgb'].eval()  # set to eval mode
         key_model_map['rgb'].requires_grad_(False)  # freeze weights
 
@@ -64,6 +69,27 @@ class MultiImageObsEncoder(nn.Module):
         self.rgb_keys = rgb_keys
         self.low_dim_keys = low_dim_keys
         self.key_model_map = key_model_map
+
+    @staticmethod
+    def _build_rgb_backbone(weights_path, backbone_source: str, huggingface_model_name: str):
+        source = backbone_source.strip().lower() if isinstance(backbone_source, str) else "auto"
+        if source == "huggingface":
+            return _HFDinoV2Backbone(huggingface_model_name)
+
+        if source == "dinov3":
+            resolved_weights = MultiImageObsEncoder._resolve_backbone_weights(weights_path)
+            return dinov3_vits16(pretrained=True, weights=resolved_weights)
+
+        if source != "auto":
+            raise ValueError(
+                f"Unsupported backbone_source '{backbone_source}'. Expected one of: auto, dinov3, huggingface."
+            )
+
+        try:
+            resolved_weights = MultiImageObsEncoder._resolve_backbone_weights(weights_path)
+            return dinov3_vits16(pretrained=True, weights=resolved_weights)
+        except Exception:
+            return _HFDinoV2Backbone(huggingface_model_name)
 
     @staticmethod
     def _resolve_backbone_weights(weights_path):
@@ -138,6 +164,32 @@ class MultiImageObsEncoder(nn.Module):
         example_output = self.forward(example_obs_dict)
         output_shape = example_output.shape[1:]
         return output_shape
+
+
+class _HFDinoV2Backbone(nn.Module):
+    def __init__(self, model_name: str) -> None:
+        super().__init__()
+        self.image_processor = AutoImageProcessor.from_pretrained(model_name)
+        self.model = Dinov2Model.from_pretrained(model_name)
+        image_mean = getattr(self.image_processor, "image_mean", [0.485, 0.456, 0.406])
+        image_std = getattr(self.image_processor, "image_std", [0.229, 0.224, 0.225])
+        self.register_buffer(
+            "image_mean",
+            torch.tensor(image_mean, dtype=torch.float32).view(1, -1, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std",
+            torch.tensor(image_std, dtype=torch.float32).view(1, -1, 1, 1),
+            persistent=False,
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        pixel_values = (image - self.image_mean) / self.image_std
+        outputs = self.model(pixel_values=pixel_values)
+        if getattr(outputs, "pooler_output", None) is not None:
+            return outputs.pooler_output
+        return outputs.last_hidden_state[:, 0]
 
 
 if __name__ == "__main__":
