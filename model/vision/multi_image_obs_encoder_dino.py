@@ -7,7 +7,7 @@ if __name__ == "__main__":
     sys.path.append(str(Path(__file__).parent.parent.parent))
 else:
     sys.path.append(str(Path(__file__).parent))
-from model.vision.dinov3.hub.backbones import dinov3_vits16, dinov3_vitb16
+from model.vision.dinov3.hub.backbones import Weights, dinov3_vits16, dinov3_vitb16
 
 
 class MultiImageObsEncoder(nn.Module):
@@ -28,7 +28,8 @@ class MultiImageObsEncoder(nn.Module):
         key_model_map = nn.ModuleDict()
 
         # vision backbone
-        key_model_map['rgb'] = dinov3_vits16(pretrained=True, weights=weights_path)
+        resolved_weights = self._resolve_backbone_weights(weights_path)
+        key_model_map['rgb'] = dinov3_vits16(pretrained=True, weights=resolved_weights)
         # key_model_map['rgb'] = dinov3_vitb16(pretrained=True, weights=weights_path)
         key_model_map['rgb'].eval()  # set to eval mode
         key_model_map['rgb'].requires_grad_(False)  # freeze weights
@@ -63,6 +64,24 @@ class MultiImageObsEncoder(nn.Module):
         self.rgb_keys = rgb_keys
         self.low_dim_keys = low_dim_keys
         self.key_model_map = key_model_map
+
+    @staticmethod
+    def _resolve_backbone_weights(weights_path):
+        if isinstance(weights_path, str):
+            normalized = weights_path.strip()
+            if normalized:
+                candidate = Path(normalized).expanduser()
+                if candidate.exists():
+                    return str(candidate)
+
+                lowered = normalized.lower()
+                if "lvd1689m" in lowered:
+                    return Weights.LVD1689M
+                if "sat493m" in lowered:
+                    return Weights.SAT493M
+        if weights_path is None:
+            return Weights.LVD1689M
+        return weights_path
 
     @property
     def device(self):
