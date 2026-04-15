@@ -114,6 +114,7 @@ def main() -> None:
 
     checkpoint_dir = build_checkpoint_dir(config)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    training_config = config["training"]
 
     callbacks = [
         ModelCheckpoint(
@@ -121,13 +122,13 @@ def main() -> None:
             filename="stage1-{epoch:02d}-{val_loss:.4f}",
             monitor="val_loss",
             mode="min",
-            save_last=True,
-            save_top_k=1,
+            every_n_epochs=training_config.get("checkpoint_every_n_epochs", 5),
+            save_last=training_config.get("save_last_checkpoint", True),
+            save_top_k=training_config.get("checkpoint_save_top_k", -1),
         ),
         LearningRateMonitor(logging_interval="step"),
     ]
 
-    training_config = config["training"]
     trainer_devices = resolve_devices(training_config.get("devices", 1))
     is_multi_device = trainer_devices == "auto" or (
         isinstance(trainer_devices, int) and trainer_devices > 1

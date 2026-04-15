@@ -23,7 +23,7 @@ model:
 
 training:
   batch_size: 64
-  epochs: 100
+  epochs: 20
   learning_rate: 0.00015
   weight_decay: 0.0001
   lr_scheduler: constant  # options: constant, cosine
@@ -48,6 +48,9 @@ training:
     - model.embed_dim
     - model.num_layers
     - model.num_heads
+  checkpoint_every_n_epochs: 5
+  checkpoint_save_top_k: -1
+  save_last_checkpoint: true
   accumulate_grad_batches: 1
   gradient_clip_val: 0.0
   precision: 32
