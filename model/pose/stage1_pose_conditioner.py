@@ -354,7 +354,9 @@ class Stage1PoseConditioner(nn.Module):
         self.register_buffer("image_std", torch.tensor(image_std, dtype=torch.float32).view(1, -1, 1, 1))
         self.initial_pose_pipeline = initial_pose_pipeline or InitialPosePipeline()
         self._config: Optional[dict] = None
-        self._stage1_model: Optional[Stage1Transformer] = None
+        # Keep the frozen stage-1 checkpoint out of the module tree so it does not
+        # unexpectedly appear in Lightning checkpoints or EMA parameter snapshots.
+        self._runtime_cache: Dict[str, Any] = {"stage1_model": None}
 
     def _resolve_config_path(self) -> Path:
         if self.config_path is not None:
@@ -368,8 +370,14 @@ class Stage1PoseConditioner(nn.Module):
         return self._config
 
     def _load_stage1_model(self, device: torch.device) -> Stage1Transformer:
-        if self._stage1_model is not None:
-            return self._stage1_model
+        cached_model = self._runtime_cache["stage1_model"]
+        if cached_model is not None:
+            inference_dtype = resolve_torch_dtype(self._load_config().get("inference", {}).get("model_dtype"))
+            if inference_dtype is not None and device.type == "cuda":
+                cached_model.to(device=device, dtype=inference_dtype)
+            else:
+                cached_model.to(device)
+            return cached_model
 
         config = self._load_config()
         checkpoint_path = resolve_stage1_checkpoint_path(self.checkpoint_path)
@@ -385,7 +393,7 @@ class Stage1PoseConditioner(nn.Module):
         else:
             model.to(device)
         model.requires_grad_(False)
-        self._stage1_model = model
+        self._runtime_cache["stage1_model"] = model
         return model
 
     def _choose_camera_key(self, obs_dict: Dict[str, Any]) -> str:
