@@ -1,6 +1,4 @@
-import itertools
 from copy import deepcopy
-from omegaconf import OmegaConf
 from collections import OrderedDict
 from lightning.pytorch.callbacks.callback import Callback
 from torch.optim.swa_utils import AveragedModel
@@ -23,10 +21,7 @@ class ModelAveragingCallback(Callback):
             self._latest_update_step = trainer.global_step
 
     def on_fit_end(self, trainer, pl_module):
-        average_params = itertools.chain(self._averaged_model.module.parameters(), self._averaged_model.module.buffers())
-        current_params = itertools.chain(pl_module.parameters(), pl_module.buffers())
-        for average_param, current_param in zip(average_params, current_params):
-            current_param.data.copy_(average_param.data)
+        self._copy_average_to_current(pl_module)
 
     def on_validation_epoch_start(self, trainer, pl_module):
         if self._averaged_model is not None:
@@ -62,12 +57,42 @@ class ModelAveragingCallback(Callback):
             self._averaged_model.module.load_state_dict(deepcopy(checkpoint['state_dict']), strict=False)
 
     def _swap_models(self, pl_module):
-        average_params = itertools.chain(self._averaged_model.module.parameters(), self._averaged_model.module.buffers())
-        current_params = itertools.chain(pl_module.parameters(), pl_module.buffers())
-        for average_param, current_param in zip(average_params, current_params):
-            tmp = average_param.data.clone()
-            average_param.data.copy_(current_param.data)
-            current_param.data.copy_(tmp)
+        average_tensors, current_tensors = self._get_named_tensors(pl_module)
+        for name, average_tensor in average_tensors.items():
+            current_tensor = current_tensors[name]
+            tmp = average_tensor.data.clone()
+            average_tensor.data.copy_(current_tensor.data)
+            current_tensor.data.copy_(tmp)
+
+    def _copy_average_to_current(self, pl_module):
+        average_tensors, current_tensors = self._get_named_tensors(pl_module)
+        for name, average_tensor in average_tensors.items():
+            current_tensors[name].data.copy_(average_tensor.data)
+
+    def _get_named_tensors(self, pl_module):
+        average_tensors = self._averaged_model.module.state_dict(keep_vars=True)
+        current_tensors = pl_module.state_dict(keep_vars=True)
+
+        average_keys = set(average_tensors.keys())
+        current_keys = set(current_tensors.keys())
+        if average_keys != current_keys:
+            missing_in_current = sorted(average_keys - current_keys)
+            missing_in_average = sorted(current_keys - average_keys)
+            raise RuntimeError(
+                "EMA model tensors do not match the current model. "
+                f"Missing in current: {missing_in_current[:5]}; "
+                f"missing in averaged: {missing_in_average[:5]}"
+            )
+
+        for name in average_tensors:
+            if average_tensors[name].shape != current_tensors[name].shape:
+                raise RuntimeError(
+                    "EMA tensor shape mismatch for "
+                    f"'{name}': averaged {tuple(average_tensors[name].shape)} vs "
+                    f"current {tuple(current_tensors[name].shape)}"
+                )
+
+        return average_tensors, current_tensors
 
 
 class SaveConfigCallback(Callback):
