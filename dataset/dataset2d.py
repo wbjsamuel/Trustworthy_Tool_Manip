@@ -1,9 +1,10 @@
 from typing import Union, Dict, Any
-import cv2
+import io
 import h5py
 import random
 import numpy as np
 import torch
+from PIL import Image
 from torchvision.transforms import v2
 from torch.utils.data import Dataset
 
@@ -114,8 +115,8 @@ class Dataset2D(Dataset):
             # Already decoded: [T, H, W, C]
             frames = []
             for i in range(arr.shape[0]):
-                img_bgr = arr[i]                     # assume it's already RGB or we'll convert
-                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                img_bgr = arr[i]
+                img_rgb = np.ascontiguousarray(img_bgr[..., ::-1])
                 img = self.transform(img_rgb)
                 frames.append(img)
             return torch.stack(frames, dim=0)
@@ -129,12 +130,12 @@ class Dataset2D(Dataset):
                     # You may want to skip / raise / use placeholder
                     raise ValueError(f"Empty buffer at frame {i}")
 
-                img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                if img_bgr is None:
-                    raise ValueError(f"Failed to decode frame {i} (corrupted or invalid image data)")
+                try:
+                    image = Image.open(io.BytesIO(buf.tobytes())).convert("RGB")
+                except Exception as exc:
+                    raise ValueError(f"Failed to decode frame {i} (corrupted or invalid image data)") from exc
 
-                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                img = self.transform(img_rgb)
+                img = self.transform(np.array(image))
                 frames.append(img)
 
             return torch.stack(frames, dim=0)

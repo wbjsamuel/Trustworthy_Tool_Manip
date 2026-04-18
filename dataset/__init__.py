@@ -1,4 +1,7 @@
-from .dataset2d import Dataset2D
-from .dataset3d import Dataset3D
+"""Dataset package for Hydra import targets.
 
-__all__ = ["Dataset2D", "Dataset3D"]
+Keep this module lightweight so importing `dataset.dataset2d.Dataset2D`
+does not eagerly import optional native dependencies such as OpenCV.
+"""
+
+__all__ = []

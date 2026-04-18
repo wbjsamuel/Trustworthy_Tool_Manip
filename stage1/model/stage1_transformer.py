@@ -1,9 +1,11 @@
 import time
+import math
 from typing import Any, List, Optional
 
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms
 from transformers import AutoProcessor, AutoTokenizer, SiglipVisionModel, T5EncoderModel
 
@@ -22,11 +24,13 @@ class ImageEncoder(nn.Module):
         dino_feature_dim: int = 768,
         siglip_feature_dim: int = 768,
         freeze_backbones: bool = True,
+        backbone_image_size: tuple[int, int] = (224, 224),
     ) -> None:
         super().__init__()
         self.dino_feature_dim = dino_feature_dim
         self.siglip_feature_dim = siglip_feature_dim
         self.freeze_backbones = freeze_backbones
+        self.backbone_image_size = backbone_image_size
 
         self.dino_transform = transforms.Normalize(
             mean=IMAGENET_DEFAULT_MEAN,
@@ -61,14 +65,40 @@ class ImageEncoder(nn.Module):
         return dino_features["x_norm_patchtokens"].mean(dim=1)
 
     def _encode_siglip(self, image: torch.Tensor) -> torch.Tensor:
-        # The dataset already emits 224x224 RGB tensors in [0, 1], so the
+        # The image is already resized for the vision backbones, so the
         # remaining processor work is just channel normalization. Doing that
         # directly on-device avoids a CPU round-trip for every batch.
         pixel_values = (image - self.siglip_mean) / self.siglip_std
         siglip_outputs = self.siglip(pixel_values=pixel_values)
         return siglip_outputs.pooler_output
 
+    def _prepare_backbone_image(self, image: torch.Tensor) -> torch.Tensor:
+        if image.shape[-2:] == self.backbone_image_size:
+            return image
+        target_h, target_w = self.backbone_image_size
+        _, channels, height, width = image.shape
+        scale = min(target_h / height, target_w / width)
+        resized_h = max(1, min(target_h, math.floor(height * scale)))
+        resized_w = max(1, min(target_w, math.floor(width * scale)))
+
+        resized = F.interpolate(
+            image,
+            size=(resized_h, resized_w),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+
+        # Letterbox-pad to the backbone input size so we preserve the full field
+        # of view instead of distorting wide observations into a square.
+        padded = image.new_zeros((image.shape[0], channels, target_h, target_w))
+        pad_top = (target_h - resized_h) // 2
+        pad_left = (target_w - resized_w) // 2
+        padded[:, :, pad_top : pad_top + resized_h, pad_left : pad_left + resized_w] = resized
+        return padded
+
     def forward(self, image: torch.Tensor) -> torch.Tensor:
+        image = self._prepare_backbone_image(image)
         if self.freeze_backbones:
             with torch.no_grad():
                 dino_features = self._encode_dino(image)
