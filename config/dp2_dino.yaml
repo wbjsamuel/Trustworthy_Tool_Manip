@@ -84,11 +84,17 @@ checkpoint:
   mode: min
   save_top_k: 1
   save_last: True
-  save_weights_only: True
+  save_weights_only: False
   every_n_train_steps: null
   save_on_train_epoch_end: False
   filename: 'step={step:08d}-loss={val/loss:.4f}'
   auto_insert_metric_name: False
+
+resume:
+  enabled: False
+  checkpoint_path: null  # file or directory; when null, checkpoint_dir is searched
+  checkpoint_dir: null   # defaults to the current Hydra run checkpoints directory
+  checkpoint_name: last.ckpt
 
 trainer:
   max_epochs: 300

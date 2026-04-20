@@ -2,7 +2,7 @@ import os
 import hydra
 from hydra.core.hydra_config import HydraConfig
 import torch
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 import pathlib
 from prefetch_generator import BackgroundGenerator
 from torch.utils.data import DataLoader, random_split
@@ -20,6 +20,42 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 class DataLoaderX(DataLoader):
     def __iter__(self):
         return BackgroundGenerator(super().__iter__())
+
+
+def resolve_resume_checkpoint(cfg: DictConfig, output_dir: pathlib.Path) -> str | None:
+    resume_cfg = cfg.get("resume")
+    if resume_cfg is None or not resume_cfg.get("enabled", False):
+        return None
+
+    checkpoint_name = resume_cfg.get("checkpoint_name", "last.ckpt")
+    candidates: list[pathlib.Path] = []
+
+    checkpoint_path = resume_cfg.get("checkpoint_path")
+    if checkpoint_path:
+        candidates.append(pathlib.Path(checkpoint_path))
+
+    checkpoint_dir = resume_cfg.get("checkpoint_dir")
+    if checkpoint_dir:
+        candidates.append(pathlib.Path(checkpoint_dir))
+    else:
+        candidates.append(output_dir / "checkpoints")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+        if candidate.is_dir():
+            matches = sorted(
+                candidate.rglob(checkpoint_name),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if matches:
+                return str(matches[0])
+
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        f"Resume is enabled, but checkpoint '{checkpoint_name}' was not found under: {searched}"
+    )
 
 
 @hydra.main(
@@ -40,6 +76,9 @@ def main(cfg: OmegaConf):
     val_dataloader = DataLoaderX(val_dataset, **cfg.dataloader.val)
 
     model.set_normalizer(dataset.get_normalizer())
+    resume_checkpoint = resolve_resume_checkpoint(cfg, output_dir)
+    if resume_checkpoint is not None:
+        print(f"Resuming training from checkpoint: {resume_checkpoint}")
 
     callbacks = [
         LearningRateMonitor(logging_interval='step'),
@@ -66,6 +105,7 @@ def main(cfg: OmegaConf):
         model,
         train_dataloader,
         val_dataloader,
+        ckpt_path=resume_checkpoint,
     )
 
 if __name__ == "__main__":
