@@ -45,17 +45,18 @@ class ROSDiffusionDataset(Dataset):
     def extract_hdf5_data(self, idx):
         hdf5_file = self.data_files[idx]
         with h5py.File(hdf5_file, 'r') as f:
-            root = f['data']
-            obs = root['obs']
+            # root = f['data']
+            obs = f['observations']
             
             # 1. Load raw components
-            raw_joints = obs['joint_pose'][()]    # (N, 6)
-            raw_gripper = obs['gripper_state'][()] # (N, 1)
+            raw_joints = obs['qpos'][()]    # (N, 6)
+            # raw_gripper = obs['gripper_state'][()] # (N, 1)
             raw_rgb = obs['rgb'][()]               # (N, H, W, 3)
             
             # 2. Concatenate Gripper to Joint Poses to form 7D qpos
             # Final vector: [j1, j2, j3, j4, j5, j6, gripper]
-            full_qpos = np.concatenate([raw_joints, raw_gripper], axis=-1)
+            # full_qpos = np.concatenate([raw_joints, raw_gripper], axis=-1)
+            full_qpos = raw_joints
             
             # 3. Define Action as the NEXT qpos
             # action[t] = qpos[t+1]
