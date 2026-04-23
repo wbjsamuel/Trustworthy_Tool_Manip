@@ -1,8 +1,9 @@
 import argparse
 import os
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
+from typing import Optional
 from tqdm import tqdm
-import cv2
 import h5py
 import numpy as np
 from torch.utils.data import Dataset
@@ -43,55 +44,114 @@ class ROSDiffusionDataset(Dataset):
         return self.extract_hdf5_data(idx)
 
     def extract_hdf5_data(self, idx):
-        hdf5_file = self.data_files[idx]
-        with h5py.File(hdf5_file, 'r') as f:
-            # root = f['data']
-            obs = f['observations']
-            
-            # 1. Load raw components
-            raw_joints = obs['qpos'][()]    # (N, 6)
-            # raw_gripper = obs['gripper_state'][()] # (N, 1)
-            raw_rgb = obs['rgb'][()]               # (N, H, W, 3)
-            
-            # 2. Concatenate Gripper to Joint Poses to form 7D qpos
-            # Final vector: [j1, j2, j3, j4, j5, j6, gripper]
-            # full_qpos = np.concatenate([raw_joints, raw_gripper], axis=-1)
-            full_qpos = raw_joints
-            
-            # 3. Define Action as the NEXT qpos
-            # action[t] = qpos[t+1]
-            # This makes qpos (0 to N-2) and action (1 to N-1)
-            qpos_seq = full_qpos[:-1]
-            action_seq = full_qpos[1:]
-            rgb_seq = raw_rgb[:-1]
-            
-            # 4. Clipping based on the new qpos sequence
-            start_idx, end_idx = clip(qpos_seq, velocity_threshold=0.0008)
-            
-        return {
-            'obs': {
-                'cam_front': rgb_seq[start_idx:end_idx],
-                'qpos': qpos_seq[start_idx:end_idx]
-            },
-            'action': action_seq[start_idx:end_idx]
-        }
+        return extract_hdf5_data(self.data_files[idx])
 
-def main(dataset_dir: str, output_path: str) -> None:
+
+def extract_hdf5_data(hdf5_file):
+    hdf5_file = Path(hdf5_file)
+    with h5py.File(hdf5_file, 'r') as f:
+        # root = f['data']
+        obs = f['observations']
+
+        # 1. Load raw components
+        raw_joints = obs['qpos'][()]    # (N, 6)
+        # raw_gripper = obs['gripper_state'][()] # (N, 1)
+        raw_rgb = obs['rgb'][()]               # (N, H, W, 3)
+
+        # 2. Concatenate Gripper to Joint Poses if needed.
+        # Final vector would be: [j1, j2, j3, j4, j5, j6, gripper]
+        # full_qpos = np.concatenate([raw_joints, raw_gripper], axis=-1)
+        full_qpos = raw_joints
+
+        # 3. Define Action as the NEXT qpos
+        # action[t] = qpos[t+1]
+        # This makes qpos (0 to N-2) and action (1 to N-1)
+        qpos_seq = full_qpos[:-1]
+        action_seq = full_qpos[1:]
+        rgb_seq = raw_rgb[:-1]
+
+        # 4. Clipping based on the new qpos sequence
+        start_idx, end_idx = clip(qpos_seq, velocity_threshold=0.0008)
+
+    return {
+        'obs': {
+            'cam_front': rgb_seq[start_idx:end_idx],
+            'qpos': qpos_seq[start_idx:end_idx]
+        },
+        'action': action_seq[start_idx:end_idx]
+    }
+
+
+def _extract_episode(task):
+    idx, hdf5_file = task
+    return idx, extract_hdf5_data(hdf5_file)
+
+
+def iter_extracted_episodes(data_files, num_workers):
+    tasks = list(enumerate(data_files))
+    if num_workers <= 1:
+        for task in tqdm(tasks, desc="Processing", total=len(tasks)):
+            yield _extract_episode(task)
+        return
+
+    next_to_submit = 0
+    next_to_yield = 0
+    pending = set()
+    completed = {}
+    max_pending = min(len(tasks), num_workers * 2)
+
+    try:
+        executor = ProcessPoolExecutor(max_workers=num_workers)
+    except OSError as exc:
+        print(f"[WARN] Multiprocessing unavailable ({exc}); falling back to single-process extraction.")
+        for task in tqdm(tasks, desc="Processing", total=len(tasks)):
+            yield _extract_episode(task)
+        return
+
+    with executor:
+        with tqdm(total=len(tasks), desc=f"Processing ({num_workers} workers)") as pbar:
+            while next_to_submit < len(tasks) and len(pending) < max_pending:
+                pending.add(executor.submit(_extract_episode, tasks[next_to_submit]))
+                next_to_submit += 1
+
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    idx, data = future.result()
+                    completed[idx] = data
+                    pbar.update(1)
+
+                while next_to_submit < len(tasks) and len(pending) < max_pending:
+                    pending.add(executor.submit(_extract_episode, tasks[next_to_submit]))
+                    next_to_submit += 1
+
+                while next_to_yield in completed:
+                    yield next_to_yield, completed.pop(next_to_yield)
+                    next_to_yield += 1
+
+
+def main(dataset_dir: str, output_path: str, num_workers: Optional[int] = None) -> None:
     dataset = ROSDiffusionDataset(dataset_dir)
+    if num_workers is None:
+        num_workers = min(os.cpu_count() or 1, 8, len(dataset))
+    num_workers = max(1, min(num_workers, len(dataset)))
+
     comp_kwargs = {'compression': 'gzip', 'compression_opts': 4}
     
     episode_ends = []
     episode_idx = []
     total_steps = 0
+    qpos_dim = None
 
     with h5py.File(output_path, "w") as f:
         initialized = False
 
-        for i, data in tqdm(enumerate(dataset), desc="Processing", total=len(dataset)):
+        for i, data in iter_extracted_episodes(dataset.data_files, num_workers):
             obs = data["obs"]
             action = data["action"]
             rgb = obs["cam_front"]
             qpos = obs["qpos"]
+            qpos_dim = qpos.shape[1]
 
             # Save Episode Group (for visualization/debugging)
             ep_group = f.create_group(f"episode_{i}")
@@ -102,8 +162,8 @@ def main(dataset_dir: str, output_path: str) -> None:
             # Flat dataset for training
             current_len = action.shape[0]
             if not initialized:
-                f.create_dataset("qpos", data=qpos, shape=qpos.shape, maxshape=(None, 7), dtype="float32", **comp_kwargs)
-                f.create_dataset("action", data=action, shape=action.shape, maxshape=(None, 7), dtype="float32", **comp_kwargs)
+                f.create_dataset("qpos", data=qpos, shape=qpos.shape, maxshape=(None, *qpos.shape[1:]), dtype="float32", **comp_kwargs)
+                f.create_dataset("action", data=action, shape=action.shape, maxshape=(None, *action.shape[1:]), dtype="float32", **comp_kwargs)
                 initialized = True
             else:
                 for key, val in [("qpos", qpos), ("action", action)]:
@@ -118,11 +178,17 @@ def main(dataset_dir: str, output_path: str) -> None:
         f.create_dataset("episode_idx", data=np.array(episode_idx), **comp_kwargs)
 
     print(f"\n[DONE] Extraction complete.")
-    print(f"Structure: qpos (7D), action (Next 7D qpos), episode_ends ({len(episode_ends)} episodes)")
+    print(f"Structure: qpos/action ({qpos_dim}D), episode_ends ({len(episode_ends)} episodes)")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=None,
+        help="Number of worker processes for per-episode extraction. Defaults to min(cpu_count, 8, num_episodes).",
+    )
     args = parser.parse_args()
-    main(args.dataset_dir, args.output_path)
+    main(args.dataset_dir, args.output_path, args.num_workers)
