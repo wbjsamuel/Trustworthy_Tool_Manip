@@ -40,8 +40,8 @@ policy:
 
   stage1_pose_conditioner:
     _target_: model.pose.stage1_pose_conditioner.Stage1PoseConditioner
-    checkpoint_path: wangbangjun/Trustworthy_Tool_Manip/checkpoints/stage1_pretrain_4090_single/prediction_target-next_pose_batch_size-128_learning_rate-0.0002_embed_dim-2048_num_layers-8_num_heads-16_20260414_091307
-    config_path: wangbangjun/Trustworthy_Tool_Manip/stage1/config/stage1_4090_single.yaml
+    checkpoint_path: checkpoints/stage1_pretrain_4090_single/prediction_target-next_pose_batch_size-128_learning_rate-0.0002_embed_dim-2048_num_layers-8_num_heads-16_20260414_091307
+    config_path: stage1/config/stage1_4090_single.yaml
     camera_key: null
     pose_dim: 16
     instruction_key: instruction

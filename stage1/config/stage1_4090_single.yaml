@@ -3,7 +3,7 @@
 data:
   path: data/stage1_data/parsed_taco_data
   val_split: 0.1
-  prediction_target: next_pose  # options: next_pose, target_pose, delta_pose
+  prediction_target: target_pose  # options: next_pose, target_pose, delta_pose
 
 model:
   embed_dim: 2048
@@ -61,7 +61,7 @@ training:
 logging:
   use_wandb: true
   project: complex_tool_manip_stage1
-  run_name: stage1_transformer_4090_single
+  run_name: stage1_transformer_4090_single_target_pose
   save_dir: logs
   mode: online
 

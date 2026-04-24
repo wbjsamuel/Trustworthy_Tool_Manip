@@ -17,7 +17,7 @@ shape_meta: &shape_meta
 
 dataset:
   _target_: dataset.dataset2d.Dataset2D
-  dataset_path: data/screwdriver_ur10e.h5
+  dataset_path: data/stage2_data/screwdriver_ur10e.h5
   horizon: ${horizon}
   n_obs_steps: ${n_obs_steps}
   pad_before: ${eval:'${n_obs_steps}-1'}
