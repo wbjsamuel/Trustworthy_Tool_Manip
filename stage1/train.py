@@ -8,7 +8,11 @@ import torch
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 
-from stage1.config_utils import build_stage1_model_kwargs, load_stage1_config
+from stage1.config_utils import (
+    build_stage1_model_kwargs,
+    load_stage1_config,
+    resolve_stage1_checkpoint_path,
+)
 from stage1.datamodule import Stage1DataModule
 from stage1.model.stage1_transformer import Stage1Transformer
 
@@ -24,6 +28,11 @@ def parse_args() -> argparse.Namespace:
         "--config",
         default="stage1/config/stage1.yaml",
         help="Path to a Stage 1 YAML config.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        help="Path to a checkpoint file or directory to resume from. Overrides training.resume_checkpoint_path.",
     )
     return parser.parse_args()
 
@@ -87,6 +96,22 @@ def build_checkpoint_dir(config: dict) -> Path:
     return base_dir / run_name / date_dir
 
 
+def resolve_resume_checkpoint(config: dict, resume_from: str | None = None) -> Path | None:
+    training_config = config["training"]
+    if not training_config.get("resume", False) and resume_from is None:
+        return None
+
+    checkpoint_path = resume_from or training_config.get("resume_checkpoint_path")
+    checkpoint_dir = training_config.get("resume_checkpoint_dir") or training_config.get("checkpoint_dir")
+    checkpoint_name = training_config.get("resume_checkpoint_name", "last.ckpt")
+
+    return resolve_stage1_checkpoint_path(
+        checkpoint_path=checkpoint_path,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_name=checkpoint_name,
+    )
+
+
 def main() -> None:
     args = parse_args()
     config = load_stage1_config(args.config)
@@ -111,6 +136,9 @@ def main() -> None:
     )
 
     model = Stage1Transformer(**build_stage1_model_kwargs(config))
+    resume_checkpoint = resolve_resume_checkpoint(config, args.resume_from)
+    if resume_checkpoint is not None:
+        print(f"Resuming Stage 1 training from checkpoint: {resume_checkpoint}")
 
     checkpoint_dir = build_checkpoint_dir(config)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +183,7 @@ def main() -> None:
         check_val_every_n_epoch=training_config.get("check_val_every_n_epoch", 5),
     )
 
-    trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm, ckpt_path=str(resume_checkpoint) if resume_checkpoint else None)
 
     if isinstance(trainer.logger, WandbLogger):
         trainer.logger.experiment.finish()

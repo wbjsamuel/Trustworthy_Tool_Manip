@@ -54,6 +54,10 @@ training:
   checkpoint_every_n_epochs: 5
   checkpoint_save_top_k: -1
   save_last_checkpoint: true
+  resume: false
+  resume_checkpoint_path: null  # file or directory; --resume-from overrides this
+  resume_checkpoint_dir: null   # defaults to training.checkpoint_dir
+  resume_checkpoint_name: last.ckpt
   accumulate_grad_batches: 1
   gradient_clip_val: 1.0
   precision: 32

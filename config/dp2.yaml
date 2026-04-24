@@ -103,6 +103,12 @@ checkpoint:
   filename: 'epoch={epoch:0>3d}-loss={val/loss:.4f}'
   auto_insert_metric_name: False
 
+resume:
+  enabled: False
+  checkpoint_path: null  # file or directory; when null, checkpoint_dir is searched
+  checkpoint_dir: null   # defaults to the current Hydra run checkpoints directory
+  checkpoint_name: last.ckpt
+
 trainer:
   max_epochs: 300
   accelerator: auto
@@ -131,4 +137,3 @@ hydra:
   sweep:
     dir: outputs/${logging.project}/${now:%Y.%m.%d.%H.%M.%S}_${task_name}
     subdir: ${hydra.job.num}
-
