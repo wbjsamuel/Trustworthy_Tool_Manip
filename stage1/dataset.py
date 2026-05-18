@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import os
 import pickle
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -74,10 +77,35 @@ class BaseStage1Dataset(Dataset):
 
     def __init__(
         self,
-        root_dir: str = "data/stage1_data/parsed_taco_data",
+        root_dir: str | Sequence[str] = "data/stage1_data/parsed_taco_data",
+        root_dirs: Optional[Sequence[str]] = None,
         transform: Optional[transforms.Compose] = None,
+        task_names: Optional[Sequence[str]] = None,
+        sequence_globs: Optional[Sequence[str]] = None,
+        pose_filenames: Optional[Sequence[str]] = None,
+        image_dirs: Optional[Sequence[str]] = None,
+        image_globs: Optional[Sequence[str]] = None,
+        image_filename_format: str = "{frame_idx:06d}.png",
+        instruction_template: Optional[str] = None,
+        task_instructions: Optional[Dict[str, str]] = None,
+        frame_stride: int = 1,
+        max_sequences: Optional[int] = None,
+        max_samples_per_sequence: Optional[int] = None,
+        strict: bool = False,
     ) -> None:
-        self.root_dir = root_dir
+        self.root_dirs = self._normalize_root_dirs(root_dir, root_dirs)
+        self.task_names = set(task_names) if task_names else None
+        self.sequence_globs = list(sequence_globs or ["seq_*"])
+        self.pose_filenames = list(pose_filenames or ["tool_poses.pkl"])
+        self.image_dirs = list(image_dirs or ["rgb"])
+        self.image_globs = list(image_globs or ["*.png", "*.jpg", "*.jpeg"])
+        self.image_filename_format = image_filename_format
+        self.instruction_template = instruction_template
+        self.task_instructions = dict(task_instructions or {})
+        self.frame_stride = max(1, int(frame_stride))
+        self.max_sequences = max_sequences
+        self.max_samples_per_sequence = max_samples_per_sequence
+        self.strict = strict
         self.transform = transform or transforms.Compose(
             [
                 transforms.Resize((224, 224)),
@@ -86,12 +114,34 @@ class BaseStage1Dataset(Dataset):
         )
         self.samples: List[Dict[str, object]] = []
 
-        if not os.path.isdir(self.root_dir):
+        missing_roots = [str(root_dir) for root_dir in self.root_dirs if not root_dir.is_dir()]
+        if missing_roots and self.strict:
             raise FileNotFoundError(
-                f"Stage1 dataset directory was not found: {self.root_dir}"
+                "Stage1 dataset directory was not found: "
+                + ", ".join(missing_roots)
+            )
+        self.root_dirs = [root_dir for root_dir in self.root_dirs if root_dir.is_dir()]
+        if not self.root_dirs:
+            raise FileNotFoundError(
+                "No Stage1 dataset directories were found. Checked: "
+                + ", ".join(missing_roots)
             )
 
         self._build_index()
+
+    @staticmethod
+    def _normalize_root_dirs(
+        root_dir: str | Sequence[str],
+        root_dirs: Optional[Sequence[str]],
+    ) -> List[Path]:
+        raw_roots: Sequence[str]
+        if root_dirs is not None:
+            raw_roots = root_dirs
+        elif isinstance(root_dir, (list, tuple)):
+            raw_roots = root_dir
+        else:
+            raw_roots = [root_dir]
+        return [Path(path).expanduser() for path in raw_roots]
 
     @staticmethod
     def _load_pose_sequence(tool_poses_path: str) -> np.ndarray:
@@ -109,33 +159,106 @@ class BaseStage1Dataset(Dataset):
 
         return tool_poses
 
+    @staticmethod
+    def _sort_image_paths(paths: Sequence[Path]) -> List[Path]:
+        def sort_key(path: Path) -> tuple[int, int | str, str]:
+            try:
+                return (0, int(path.stem), path.name)
+            except ValueError:
+                return (1, path.stem, path.name)
+
+        return sorted(paths, key=sort_key)
+
+    def _find_first_file(self, seq_path: Path, filenames: Sequence[str]) -> Optional[Path]:
+        for filename in filenames:
+            path = seq_path / filename
+            if path.is_file():
+                return path
+        return None
+
+    def _find_first_dir(self, seq_path: Path, dirnames: Sequence[str]) -> Optional[Path]:
+        for dirname in dirnames:
+            path = seq_path / dirname
+            if path.is_dir():
+                return path
+        return None
+
+    def _list_image_paths(self, image_dir: Path) -> List[Path]:
+        image_paths: List[Path] = []
+        for pattern in self.image_globs:
+            image_paths.extend(image_dir.glob(pattern))
+        return self._sort_image_paths({path for path in image_paths if path.is_file()})
+
+    def _resolve_image_path(
+        self,
+        image_dir: Path,
+        image_paths: Sequence[Path],
+        frame_idx: int,
+    ) -> Optional[str]:
+        try:
+            formatted_name = self.image_filename_format.format(
+                frame_idx=frame_idx,
+                index=frame_idx,
+            )
+        except (KeyError, ValueError):
+            formatted_name = f"{frame_idx:06d}.png"
+
+        formatted_path = image_dir / formatted_name
+        if formatted_path.is_file():
+            return str(formatted_path)
+
+        if frame_idx < len(image_paths):
+            return str(image_paths[frame_idx])
+
+        return None
+
+    def _iter_sequence_paths(self, task_path: Path) -> List[Path]:
+        seq_paths: List[Path] = []
+        for pattern in self.sequence_globs:
+            seq_paths.extend(path for path in task_path.glob(pattern) if path.is_dir())
+        if not seq_paths and "*" not in "".join(self.sequence_globs):
+            seq_paths = [path for path in task_path.iterdir() if path.is_dir()]
+        return sorted(set(seq_paths))
+
     def _build_index(self) -> None:
-        for task_dir in sorted(os.listdir(self.root_dir)):
-            task_path = os.path.join(self.root_dir, task_dir)
-            if not os.path.isdir(task_path):
-                continue
-
-            for seq_dir in sorted(os.listdir(task_path)):
-                seq_path = os.path.join(task_path, seq_dir)
-                if not os.path.isdir(seq_path):
+        num_sequences = 0
+        for root_dir in self.root_dirs:
+            for task_path in sorted(path for path in root_dir.iterdir() if path.is_dir()):
+                task_name = task_path.name
+                if self.task_names is not None and task_name not in self.task_names:
                     continue
 
-                tool_poses_path = os.path.join(seq_path, "tool_poses.pkl")
-                rgb_dir = os.path.join(seq_path, "rgb")
-                if not os.path.isfile(tool_poses_path) or not os.path.isdir(rgb_dir):
-                    continue
+                for seq_path in self._iter_sequence_paths(task_path):
+                    if self.max_sequences is not None and num_sequences >= self.max_sequences:
+                        return
 
-                tool_poses = self._load_pose_sequence(tool_poses_path)
+                    tool_poses_path = self._find_first_file(seq_path, self.pose_filenames)
+                    image_dir = self._find_first_dir(seq_path, self.image_dirs)
+                    if tool_poses_path is None or image_dir is None:
+                        continue
 
-                if tool_poses.shape[0] < 2:
-                    continue
+                    tool_poses = self._load_pose_sequence(str(tool_poses_path))
 
-                self._build_sequence_samples(seq_path, rgb_dir, tool_poses)
+                    if tool_poses.shape[0] < 2:
+                        continue
+
+                    image_paths = self._list_image_paths(image_dir)
+                    if not image_paths:
+                        continue
+
+                    self._build_sequence_samples(
+                        str(seq_path),
+                        image_dir,
+                        image_paths,
+                        tool_poses,
+                    )
+                    num_sequences += 1
 
     def _build_sequence_samples(
         self,
         seq_path: str,
-        rgb_dir: str,
+        image_dir: Path,
+        image_paths: Sequence[Path],
         tool_poses: np.ndarray,
     ) -> None:
         raise NotImplementedError
@@ -156,6 +279,14 @@ class BaseStage1Dataset(Dataset):
                 if text:
                     return text
         task_name = os.path.basename(os.path.dirname(seq_path))
+        if task_name in self.task_instructions:
+            return self.task_instructions[task_name]
+        if self.instruction_template:
+            formatted_task = format_task_name_as_instruction(task_name)
+            return self.instruction_template.format(
+                task=formatted_task,
+                task_name=task_name,
+            )
         return format_task_name_as_instruction(task_name)
 
     def __len__(self) -> int:
@@ -181,15 +312,22 @@ class Stage1Dataset(BaseStage1Dataset):
     def _build_sequence_samples(
         self,
         seq_path: str,
-        rgb_dir: str,
+        image_dir: Path,
+        image_paths: Sequence[Path],
         tool_poses: np.ndarray,
     ) -> None:
         instruction = self._load_instruction(seq_path)
         num_source_frames = tool_poses.shape[0] - 1
+        sample_count = 0
 
-        for frame_idx in range(num_source_frames):
-            image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
-            if not os.path.isfile(image_path):
+        for frame_idx in range(0, num_source_frames, self.frame_stride):
+            if (
+                self.max_samples_per_sequence is not None
+                and sample_count >= self.max_samples_per_sequence
+            ):
+                break
+            image_path = self._resolve_image_path(image_dir, image_paths, frame_idx)
+            if image_path is None:
                 continue
 
             self.samples.append(
@@ -202,6 +340,7 @@ class Stage1Dataset(BaseStage1Dataset):
                     "frame_idx": frame_idx,
                 }
             )
+            sample_count += 1
 
 
 class Stage1TargetPoseDataset(BaseStage1Dataset):
@@ -210,16 +349,23 @@ class Stage1TargetPoseDataset(BaseStage1Dataset):
     def _build_sequence_samples(
         self,
         seq_path: str,
-        rgb_dir: str,
+        image_dir: Path,
+        image_paths: Sequence[Path],
         tool_poses: np.ndarray,
     ) -> None:
         instruction = self._load_instruction(seq_path)
         target_pose = flatten_pose_matrix(tool_poses[-1])
         num_source_frames = tool_poses.shape[0] - 1
+        sample_count = 0
 
-        for frame_idx in range(num_source_frames):
-            image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
-            if not os.path.isfile(image_path):
+        for frame_idx in range(0, num_source_frames, self.frame_stride):
+            if (
+                self.max_samples_per_sequence is not None
+                and sample_count >= self.max_samples_per_sequence
+            ):
+                break
+            image_path = self._resolve_image_path(image_dir, image_paths, frame_idx)
+            if image_path is None:
                 continue
 
             self.samples.append(
@@ -232,6 +378,7 @@ class Stage1TargetPoseDataset(BaseStage1Dataset):
                     "frame_idx": frame_idx,
                 }
             )
+            sample_count += 1
 
 
 class Stage1DeltaPoseDataset(BaseStage1Dataset):
@@ -240,15 +387,22 @@ class Stage1DeltaPoseDataset(BaseStage1Dataset):
     def _build_sequence_samples(
         self,
         seq_path: str,
-        rgb_dir: str,
+        image_dir: Path,
+        image_paths: Sequence[Path],
         tool_poses: np.ndarray,
     ) -> None:
         instruction = self._load_instruction(seq_path)
         num_source_frames = tool_poses.shape[0] - 1
+        sample_count = 0
 
-        for frame_idx in range(num_source_frames):
-            image_path = os.path.join(rgb_dir, f"{frame_idx:06d}.png")
-            if not os.path.isfile(image_path):
+        for frame_idx in range(0, num_source_frames, self.frame_stride):
+            if (
+                self.max_samples_per_sequence is not None
+                and sample_count >= self.max_samples_per_sequence
+            ):
+                break
+            image_path = self._resolve_image_path(image_dir, image_paths, frame_idx)
+            if image_path is None:
                 continue
 
             current_pose = tool_poses[frame_idx]
@@ -264,6 +418,7 @@ class Stage1DeltaPoseDataset(BaseStage1Dataset):
                     "frame_idx": frame_idx,
                 }
             )
+            sample_count += 1
 
 
 if __name__ == "__main__":

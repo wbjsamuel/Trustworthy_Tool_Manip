@@ -6,6 +6,13 @@ data:
   path: data/stage1_data/parsed_taco_data
   val_split: 0.1
   prediction_target: next_pose  # options: next_pose, target_pose, delta_pose
+  recipe:
+    sequence_globs: ["seq_*"]
+    pose_filenames: ["tool_poses.pkl"]
+    image_dirs: ["rgb"]
+    image_globs: ["*.png", "*.jpg", "*.jpeg"]
+    image_filename_format: "{frame_idx:06d}.png"
+    frame_stride: 1
 
 model:
   embed_dim: 2048
