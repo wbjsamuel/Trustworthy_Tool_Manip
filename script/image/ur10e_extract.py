@@ -84,19 +84,31 @@ def extract_hdf5_data(hdf5_file):
 
 def _extract_episode(task):
     idx, hdf5_file = task
-    return idx, extract_hdf5_data(hdf5_file)
+    try:
+        return idx, extract_hdf5_data(hdf5_file), None
+    except Exception as exc:
+        return idx, None, f"{type(exc).__name__}: {exc}"
+
+
+def _warn_skipped_episode(idx, hdf5_file, error):
+    print(f"[WARN] Skipping episode {idx} ({hdf5_file}): {error}")
 
 
 def iter_extracted_episodes(data_files, num_workers):
     tasks = list(enumerate(data_files))
     if num_workers <= 1:
         for task in tqdm(tasks, desc="Processing", total=len(tasks)):
-            yield _extract_episode(task)
+            idx, data, error = _extract_episode(task)
+            if error is not None:
+                _warn_skipped_episode(idx, task[1], error)
+                continue
+            yield idx, data
         return
 
     next_to_submit = 0
     next_to_yield = 0
     pending = set()
+    future_tasks = {}
     completed = {}
     max_pending = min(len(tasks), num_workers * 2)
 
@@ -105,28 +117,46 @@ def iter_extracted_episodes(data_files, num_workers):
     except OSError as exc:
         print(f"[WARN] Multiprocessing unavailable ({exc}); falling back to single-process extraction.")
         for task in tqdm(tasks, desc="Processing", total=len(tasks)):
-            yield _extract_episode(task)
+            idx, data, error = _extract_episode(task)
+            if error is not None:
+                _warn_skipped_episode(idx, task[1], error)
+                continue
+            yield idx, data
         return
 
     with executor:
         with tqdm(total=len(tasks), desc=f"Processing ({num_workers} workers)") as pbar:
             while next_to_submit < len(tasks) and len(pending) < max_pending:
-                pending.add(executor.submit(_extract_episode, tasks[next_to_submit]))
+                future = executor.submit(_extract_episode, tasks[next_to_submit])
+                pending.add(future)
+                future_tasks[future] = tasks[next_to_submit]
                 next_to_submit += 1
 
             while pending:
                 done, pending = wait(pending, return_when=FIRST_COMPLETED)
                 for future in done:
-                    idx, data = future.result()
-                    completed[idx] = data
+                    task = future_tasks.pop(future)
+                    idx, hdf5_file = task
+                    try:
+                        idx, data, error = future.result()
+                    except Exception as exc:
+                        data = None
+                        error = f"{type(exc).__name__}: {exc}"
+                    completed[idx] = (data, error, hdf5_file)
                     pbar.update(1)
 
                 while next_to_submit < len(tasks) and len(pending) < max_pending:
-                    pending.add(executor.submit(_extract_episode, tasks[next_to_submit]))
+                    future = executor.submit(_extract_episode, tasks[next_to_submit])
+                    pending.add(future)
+                    future_tasks[future] = tasks[next_to_submit]
                     next_to_submit += 1
 
                 while next_to_yield in completed:
-                    yield next_to_yield, completed.pop(next_to_yield)
+                    data, error, hdf5_file = completed.pop(next_to_yield)
+                    if error is not None:
+                        _warn_skipped_episode(next_to_yield, hdf5_file, error)
+                    else:
+                        yield next_to_yield, data
                     next_to_yield += 1
 
 
@@ -142,6 +172,7 @@ def main(dataset_dir: str, output_path: str, num_workers: Optional[int] = None) 
     episode_idx = []
     total_steps = 0
     qpos_dim = None
+    skipped_episodes = 0
 
     with h5py.File(output_path, "w") as f:
         initialized = False
@@ -174,11 +205,19 @@ def main(dataset_dir: str, output_path: str, num_workers: Optional[int] = None) 
             episode_ends.append(total_steps)
             episode_idx += [(i, j) for j in range(current_len)]
 
+        skipped_episodes = len(dataset) - len(episode_ends)
+        if not initialized:
+            raise RuntimeError(
+                f"No episodes could be extracted from {dataset_dir}; skipped {skipped_episodes} episodes."
+            )
+
         f.create_dataset("episode_ends", data=np.array(episode_ends), **comp_kwargs)
         f.create_dataset("episode_idx", data=np.array(episode_idx), **comp_kwargs)
 
     print(f"\n[DONE] Extraction complete.")
     print(f"Structure: qpos/action ({qpos_dim}D), episode_ends ({len(episode_ends)} episodes)")
+    if skipped_episodes:
+        print(f"Skipped episodes: {skipped_episodes}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
