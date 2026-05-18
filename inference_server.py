@@ -72,7 +72,86 @@ def _format_ur10e_action_for_deployment(action) -> np.ndarray:
     ).astype(np.float32, copy=False)
 
 
-def _load_compatible_state_dict(model: LightningModule, payload) -> None:
+def _shape_meta_dim(cfg, key: str) -> Optional[int]:
+    try:
+        if key == "action":
+            return _last_dim_shape(cfg.shape_meta.action.shape)
+        return _last_dim_shape(cfg.shape_meta.obs[key].shape)
+    except Exception:
+        return None
+
+
+def _clone_param_dict(value):
+    if isinstance(value, torch.nn.ParameterDict):
+        return torch.nn.ParameterDict(
+            {key: _clone_param_dict(item) for key, item in value.items()}
+        )
+    return value.detach().clone()
+
+
+def _adapt_vector_dim(value, target_dim: Optional[int], key_name: str):
+    cloned = value.detach().clone()
+    if target_dim is None or cloned.ndim != 1 or cloned.shape[0] == target_dim:
+        return cloned
+
+    current_dim = cloned.shape[0]
+    if current_dim == UR10E_LEGACY_ACTION_DIM and target_dim == UR10E_DEPLOY_ACTION_DIM:
+        return torch.cat([cloned[:UR10E_ARM_DOF], cloned[-1:]], dim=0)
+
+    if current_dim == UR10E_DEPLOY_ACTION_DIM and target_dim == UR10E_LEGACY_ACTION_DIM:
+        neutral = 1.0 if key_name in {"scale", "std"} else 0.0
+        blank = torch.full_like(cloned[:1], neutral)
+        return torch.cat([cloned[:UR10E_ARM_DOF], blank, cloned[-1:]], dim=0)
+
+    print(
+        f"[WARN] Keeping normalizer tensor '{key_name}' with dim {current_dim}; "
+        f"cannot adapt to expected dim {target_dim}."
+    )
+    return cloned
+
+
+def _adapt_normalizer_field(field, target_dim: Optional[int]):
+    adapted = torch.nn.ParameterDict()
+    for key, value in field.items():
+        if isinstance(value, torch.nn.ParameterDict):
+            adapted[key] = _adapt_normalizer_field(value, target_dim)
+        else:
+            adapted[key] = _adapt_vector_dim(value, target_dim, key)
+    return adapted
+
+
+def _restore_normalizer(model: LightningModule, payload, cfg) -> None:
+    if not hasattr(model, "normalizer"):
+        return
+
+    state_dict = payload.get("state_dict", payload)
+    normalizer_state = {
+        key.removeprefix("normalizer."): value
+        for key, value in state_dict.items()
+        if key.startswith("normalizer.")
+    }
+    if not normalizer_state:
+        print("[WARN] Checkpoint has no normalizer state.")
+        return
+
+    model.normalizer.load_state_dict(normalizer_state, strict=False)
+
+    params = model.normalizer.params_dict
+    if "action" in params:
+        action_dim = _shape_meta_dim(cfg, "action")
+        params["action"] = _adapt_normalizer_field(params["action"], action_dim)
+    if "qpos" in params:
+        qpos_dim = _shape_meta_dim(cfg, "qpos")
+        params["qpos"] = _adapt_normalizer_field(params["qpos"], qpos_dim)
+    elif "action" in params:
+        qpos_dim = _shape_meta_dim(cfg, "qpos")
+        params["qpos"] = _adapt_normalizer_field(params["action"], qpos_dim)
+        print("[WARN] Checkpoint normalizer had no 'qpos'; copied/adapted it from 'action'.")
+
+    print("Loaded normalizer fields:", ", ".join(params.keys()))
+
+
+def _load_compatible_state_dict(model: LightningModule, payload, cfg) -> None:
     """Load checkpoint tensors that match the instantiated model.
 
     Some DP2-DINO checkpoints were trained with the torch-hub DINOv3 module
@@ -87,6 +166,8 @@ def _load_compatible_state_dict(model: LightningModule, payload) -> None:
     skipped = []
 
     for key, value in state_dict.items():
+        if key.startswith("normalizer."):
+            continue
         target = model_state.get(key)
         if target is not None and tuple(target.shape) == tuple(value.shape):
             compatible_state[key] = value
@@ -105,6 +186,7 @@ def _load_compatible_state_dict(model: LightningModule, payload) -> None:
         print("Missing model key examples:", ", ".join(missing[:5]))
     if unexpected:
         print("Unexpected loaded key examples:", ", ".join(unexpected[:5]))
+    _restore_normalizer(model, payload, cfg)
 
 
 class DP2InferenceEngine:
@@ -120,7 +202,7 @@ class DP2InferenceEngine:
             payload = torch.load(f, pickle_module=dill, map_location=self.device)
         
         self.model: LightningModule = hydra.utils.instantiate(self.cfg.policy)
-        _load_compatible_state_dict(self.model, payload)
+        _load_compatible_state_dict(self.model, payload, self.cfg)
         self.model.to(self.device).eval()
         self.rgb_keys = [
             key
