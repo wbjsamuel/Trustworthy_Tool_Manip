@@ -1,11 +1,76 @@
 import socket, pickle, struct, torch, cv2, time, dill, hydra, argparse
 import numpy as np
 from pathlib import Path
+from typing import Optional
 from omegaconf import OmegaConf
 from lightning import LightningModule
 
 if not OmegaConf.has_resolver("eval"):
     OmegaConf.register_new_resolver("eval", eval)
+
+UR10E_ARM_DOF = 6
+UR10E_DEPLOY_ACTION_DIM = 7
+UR10E_LEGACY_ACTION_DIM = 8
+
+
+def _last_dim_shape(shape) -> Optional[int]:
+    if shape is None:
+        return None
+    shape = tuple(shape)
+    return int(shape[-1]) if len(shape) > 0 else None
+
+
+def _format_ur10e_qpos(qpos, expected_dim: Optional[int]) -> np.ndarray:
+    """Format qpos history for the checkpoint while keeping deployment 7D canonical.
+
+    Deployment observations are expected to be [joint_0..joint_5, gripper].
+    Some older checkpoints may have been trained with an extra compatibility
+    column before gripper. For those, insert a blank column and keep gripper as
+    the final dimension.
+    """
+    qpos_arr = np.asarray(qpos, dtype=np.float32)
+    if qpos_arr.shape[-1] == UR10E_DEPLOY_ACTION_DIM:
+        canonical = qpos_arr
+    elif qpos_arr.shape[-1] == UR10E_LEGACY_ACTION_DIM:
+        canonical = np.concatenate(
+            [qpos_arr[..., :UR10E_ARM_DOF], qpos_arr[..., -1:]],
+            axis=-1,
+        )
+    elif qpos_arr.shape[-1] == UR10E_ARM_DOF:
+        gripper = np.zeros((*qpos_arr.shape[:-1], 1), dtype=np.float32)
+        canonical = np.concatenate([qpos_arr, gripper], axis=-1)
+    else:
+        raise ValueError(f"Unsupported UR10e qpos shape {qpos_arr.shape}")
+
+    if expected_dim is None or expected_dim == canonical.shape[-1]:
+        return canonical
+
+    if expected_dim == UR10E_LEGACY_ACTION_DIM:
+        blank = np.zeros((*canonical.shape[:-1], 1), dtype=np.float32)
+        return np.concatenate(
+            [canonical[..., :UR10E_ARM_DOF], blank, canonical[..., -1:]],
+            axis=-1,
+        )
+
+    if expected_dim == UR10E_ARM_DOF:
+        return canonical[..., :UR10E_ARM_DOF]
+
+    raise ValueError(
+        f"Checkpoint expects qpos dim {expected_dim}, cannot adapt deployment qpos shape {qpos_arr.shape}"
+    )
+
+
+def _format_ur10e_action_for_deployment(action) -> np.ndarray:
+    """Return [6 joint targets, gripper] regardless of old/new model width."""
+    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+    if action_arr.size < UR10E_DEPLOY_ACTION_DIM:
+        raise ValueError(f"Expected at least 7 UR10e action values, got {action_arr.size}")
+
+    return np.concatenate(
+        [action_arr[:UR10E_ARM_DOF], action_arr[-1:]],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
 
 class DP2InferenceEngine:
     def __init__(self, ckpt_path):
@@ -32,6 +97,10 @@ class DP2InferenceEngine:
             for key, attr in self.cfg.shape_meta.obs.items()
             if attr.get("type", "low_dim") == "low_dim"
         ]
+        self.low_dim_shapes = {
+            key: tuple(self.cfg.shape_meta.obs[key].shape)
+            for key in self.low_dim_keys
+        }
         
         print("--- RTX 5090: Warming Up ---")
         self.warmup()
@@ -67,7 +136,11 @@ class DP2InferenceEngine:
             for key in self.low_dim_keys:
                 if key not in obs_dict:
                     continue
-                model_obs[key] = torch.from_numpy(np.array(obs_dict[key])).float().unsqueeze(0).to(self.device)
+                expected_dim = _last_dim_shape(self.low_dim_shapes.get(key))
+                low_dim_obs = obs_dict[key]
+                if key == "qpos":
+                    low_dim_obs = _format_ur10e_qpos(low_dim_obs, expected_dim)
+                model_obs[key] = torch.from_numpy(np.array(low_dim_obs)).float().unsqueeze(0).to(self.device)
 
             for passthrough_key in ["instruction", "object_prompt", "initial_object_pose", "object_pose", "pose"]:
                 if passthrough_key in obs_dict:
@@ -77,7 +150,8 @@ class DP2InferenceEngine:
             torch.cuda.synchronize() 
             
             actions = out['action'] if isinstance(out, dict) else out
-            return actions[0, 0, :].cpu().numpy().tolist() if len(actions.shape) == 3 else actions[0, :].cpu().numpy().tolist()
+            action = actions[0, 0, :].cpu().numpy() if len(actions.shape) == 3 else actions[0, :].cpu().numpy()
+            return _format_ur10e_action_for_deployment(action).tolist()
         except Exception as e:
             print(f"Inference Error: {e}")
             return None

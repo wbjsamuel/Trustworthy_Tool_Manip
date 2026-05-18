@@ -115,6 +115,7 @@ def resolve_resume_checkpoint(config: dict, resume_from: str | None = None) -> P
 def main() -> None:
     args = parse_args()
     config = load_stage1_config(args.config)
+    data_config = config["data"]
     sharing_strategy = config["training"].get("sharing_strategy")
     if sharing_strategy:
         torch.multiprocessing.set_sharing_strategy(sharing_strategy)
@@ -124,15 +125,18 @@ def main() -> None:
         torch.backends.cudnn.benchmark = config["training"].get("cudnn_benchmark", True)
 
     dm = Stage1DataModule(
-        data_path=config["data"]["path"],
+        data_path=data_config.get("path", "data/stage1_data/parsed_taco_data"),
+        data_paths=data_config.get("paths"),
+        dataset_kwargs=data_config.get("recipe", {}),
+        data_sources=data_config.get("sources"),
         batch_size=config["training"]["batch_size"],
         num_workers=config["training"].get("num_workers", 4),
-        val_split=config["data"].get("val_split", 0.1),
+        val_split=data_config.get("val_split", 0.1),
         seed=config["training"].get("seed", 42),
         prefetch_factor=config["training"].get("prefetch_factor", 4),
         persistent_workers=config["training"].get("persistent_workers", True),
         pin_memory=config["training"].get("pin_memory", False),
-        prediction_target=config["data"].get("prediction_target", "next_pose"),
+        prediction_target=data_config.get("prediction_target", "next_pose"),
     )
 
     model = Stage1Transformer(**build_stage1_model_kwargs(config))

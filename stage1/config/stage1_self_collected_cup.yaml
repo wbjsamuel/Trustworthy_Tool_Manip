@@ -1,16 +1,33 @@
-# Configuration for the Stage 1 pose prediction model.
+# Stage 1 example config that mixes parsed TACO with self-collected cup data.
 
 data:
-  path: data/stage1_data/parsed_taco_data
   val_split: 0.1
   prediction_target: next_pose  # options: next_pose, target_pose, delta_pose
-  recipe:
-    sequence_globs: ["seq_*"]
-    pose_filenames: ["tool_poses.pkl"]
-    image_dirs: ["rgb"]
-    image_globs: ["*.png", "*.jpg", "*.jpeg"]
-    image_filename_format: "{frame_idx:06d}.png"
-    frame_stride: 1
+  sources:
+    - paths:
+        - data/stage1_data/parsed_taco_data
+        - ../Trustworthy_Tool_Manip/data/stage1_data/parsed_taco_data
+        - Trustworthy_Tool_Manip/data/stage1_data/parsed_taco_data
+      recipe:
+        sequence_globs: ["seq_*"]
+        pose_filenames: ["tool_poses.pkl"]
+        image_dirs: ["rgb"]
+        image_globs: ["*.png", "*.jpg", "*.jpeg"]
+        image_filename_format: "{frame_idx:06d}.png"
+        frame_stride: 1
+    - paths:
+        - ../Trustworthy_Tool_Manip/data/stage1_data/stage1_self_collected
+        - Trustworthy_Tool_Manip/data/stage1_data/stage1_self_collected
+        - data/stage1_data/stage1_self_collected
+      recipe:
+        task_names: ["cup"]
+        sequence_globs: ["seq_*"]
+        pose_filenames: ["tool_poses.pkl"]
+        image_dirs: ["rgb"]
+        image_globs: ["*.png", "*.jpg", "*.jpeg"]
+        image_filename_format: "{frame_idx:06d}.png"
+        instruction_template: "track {task}"
+        frame_stride: 1
 
 model:
   embed_dim: 2048
@@ -35,11 +52,11 @@ training:
   weight_decay: 0.0001
   lr_scheduler: constant  # options: constant, cosine
   lr_warmup_steps: 0
-  devices: 1  # set to an integer >1, a list like [0,1], "0,1", or "auto" for multi-GPU
+  devices: 1
   num_nodes: 1
-  strategy: auto  # use "ddp" for multi-GPU training
+  strategy: auto
   sync_batchnorm: false
-  num_workers: 24
+  num_workers: 8
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true
@@ -47,7 +64,7 @@ training:
   seed: 42
   deterministic: false
   log_every_n_steps: 10
-  checkpoint_dir: checkpoints/stage1
+  checkpoint_dir: checkpoints/stage1_self_collected_cup
   checkpoint_name_params:
     - data.prediction_target
     - training.batch_size
@@ -59,8 +76,8 @@ training:
   checkpoint_save_top_k: -1
   save_last_checkpoint: true
   resume: false
-  resume_checkpoint_path: null  # file or directory; --resume-from overrides this
-  resume_checkpoint_dir: null   # defaults to training.checkpoint_dir
+  resume_checkpoint_path: null
+  resume_checkpoint_dir: null
   resume_checkpoint_name: last.ckpt
   accumulate_grad_batches: 1
   gradient_clip_val: 0.0
@@ -72,12 +89,12 @@ training:
 logging:
   use_wandb: true
   project: trustworthy_tool_manip
-  run_name: stage1_transformer_training
+  run_name: stage1_self_collected_cup
   save_dir: logs
   mode: online
 
 inference:
-  checkpoint_dir: checkpoints/stage1
+  checkpoint_dir: checkpoints/stage1_self_collected_cup
   checkpoint_name: last.ckpt
   model_dtype: float32
   autocast_dtype: null
