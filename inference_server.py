@@ -72,6 +72,41 @@ def _format_ur10e_action_for_deployment(action) -> np.ndarray:
     ).astype(np.float32, copy=False)
 
 
+def _load_compatible_state_dict(model: LightningModule, payload) -> None:
+    """Load checkpoint tensors that match the instantiated model.
+
+    Some DP2-DINO checkpoints were trained with the torch-hub DINOv3 module
+    whose keys look like `blocks.*`, while a freshly instantiated encoder may
+    expose HF-style keys such as `model.encoder.layer.*`. The encoder can still
+    initialize from its pretrained weights, so inference should load the policy
+    and normalizer weights that match and skip incompatible backbone-key drift.
+    """
+    state_dict = payload.get("state_dict", payload)
+    model_state = model.state_dict()
+    compatible_state = {}
+    skipped = []
+
+    for key, value in state_dict.items():
+        target = model_state.get(key)
+        if target is not None and tuple(target.shape) == tuple(value.shape):
+            compatible_state[key] = value
+        else:
+            skipped.append(key)
+
+    missing, unexpected = model.load_state_dict(compatible_state, strict=False)
+    print(
+        "Loaded compatible checkpoint tensors: "
+        f"{len(compatible_state)}/{len(state_dict)} "
+        f"(skipped {len(skipped)} incompatible/unexpected tensors)."
+    )
+    if skipped:
+        print("Skipped checkpoint key examples:", ", ".join(skipped[:5]))
+    if missing:
+        print("Missing model key examples:", ", ".join(missing[:5]))
+    if unexpected:
+        print("Unexpected loaded key examples:", ", ".join(unexpected[:5]))
+
+
 class DP2InferenceEngine:
     def __init__(self, ckpt_path):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -85,7 +120,7 @@ class DP2InferenceEngine:
             payload = torch.load(f, pickle_module=dill, map_location=self.device)
         
         self.model: LightningModule = hydra.utils.instantiate(self.cfg.policy)
-        self.model.load_state_dict(payload['state_dict'])
+        _load_compatible_state_dict(self.model, payload)
         self.model.to(self.device).eval()
         self.rgb_keys = [
             key
