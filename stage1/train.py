@@ -44,9 +44,9 @@ def build_logger(config: dict):
             project=logging_config["project"],
             name=logging_config["run_name"],
             save_dir=logging_config.get("save_dir", "logs"),
-            mode=logging_config.get("mode", "online"),
+            mode=logging_config.get("mode", "offline"),
+            config=config,
         )
-        logger.experiment.config.update(config, allow_val_change=True)
         return logger
     save_dir = logging_config.get("save_dir", "logs")
     return CSVLogger(save_dir=save_dir, name=logging_config.get("run_name", "stage1"))
@@ -189,7 +189,7 @@ def main() -> None:
 
     trainer.fit(model, datamodule=dm, ckpt_path=str(resume_checkpoint) if resume_checkpoint else None)
 
-    if isinstance(trainer.logger, WandbLogger):
+    if WandbLogger is not None and isinstance(trainer.logger, WandbLogger):
         trainer.logger.experiment.finish()
 
 
