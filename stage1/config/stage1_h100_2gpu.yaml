@@ -1,0 +1,71 @@
+# High-throughput Stage 1 config for 8x H200 training.
+# This keeps the Stage 1 architecture inference-friendly while scaling
+# global batch and training precision aggressively for large-memory GPUs.
+
+data:
+  path: data/stage1_data/parsed_taco_data
+  val_split: 0.1
+  prediction_target: next_pose  # options: next_pose, target_pose, delta_pose
+
+model:
+  embed_dim: 2048
+  num_heads: 16
+  num_layers: 8
+  feedforward_mult: 8
+  num_fusion_tokens: 32
+  image_feature_dim: 1536
+  language_feature_dim: 768
+  pose_dim: 16
+  dino_repo: facebookresearch/dinov2
+  dino_model_name: dinov2_vitb14_reg
+  siglip_model_name: google/siglip-base-patch16-224
+  text_model_name: t5-base
+  freeze_backbones: true
+  cache_language_embeddings: true
+
+training:
+  batch_size: 384
+  epochs: 100
+  learning_rate: 0.08
+  weight_decay: 0.0001
+  lr_scheduler: cosine  # options: constant, cosine
+  lr_warmup_steps: 1000
+  devices: 2
+  num_nodes: 1
+  strategy: ddp
+  sync_batchnorm: false
+  num_workers: 32
+  prefetch_factor: 4
+  persistent_workers: true
+  pin_memory: true
+  sharing_strategy: file_system
+  seed: 42
+  deterministic: false
+  log_every_n_steps: 5
+  checkpoint_dir: checkpoints/stage1_h100_2gpu
+  checkpoint_name_params:
+    - data.prediction_target
+    - training.batch_size
+    - training.learning_rate
+    - model.embed_dim
+    - model.num_layers
+    - model.num_heads
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  precision: 32
+  matmul_precision: high
+  cudnn_benchmark: true
+  check_val_every_n_epoch: 10
+
+logging:
+  use_wandb: true
+  project: trustworthy_tool_manip
+  run_name: stage1_transformer_h100_2gpu
+  save_dir: logs
+  mode: offline
+
+inference:
+  checkpoint_dir: checkpoints/stage1_h100_2gpu
+  checkpoint_name: last.ckpt
+  model_dtype: float32
+  autocast_dtype: null

@@ -16,11 +16,11 @@ data:
         image_filename_format: "{frame_idx:06d}.png"
         frame_stride: 1
     - paths:
-        - ../Trustworthy_Tool_Manip/data/stage1_data/stage1_self_collected
-        - Trustworthy_Tool_Manip/data/stage1_data/stage1_self_collected
-        - data/stage1_data/stage1_self_collected
+        - ../Trustworthy_Tool_Manip/data/stage1_data/self_collected_stage1
+        - Trustworthy_Tool_Manip/data/stage1_data/self_collected_stage1
+        - data/stage1_data/self_collected_stage1
       recipe:
-        task_names: ["cup"]
+        task_names: ["cup", "knife", "hammer", "brush", "spoon"]
         sequence_globs: ["seq_*"]
         pose_filenames: ["tool_poses.pkl"]
         image_dirs: ["rgb"]
@@ -30,29 +30,29 @@ data:
         frame_stride: 1
 
 model:
-  embed_dim: 2048
-  num_heads: 16
-  num_layers: 8
+  embed_dim: 2560
+  num_heads: 20
+  num_layers: 12
   feedforward_mult: 8
-  num_fusion_tokens: 32
+  num_fusion_tokens: 48
   image_feature_dim: 1536
   language_feature_dim: 768
   pose_dim: 16
   dino_repo: facebookresearch/dinov2
   dino_model_name: dinov2_vitb14_reg
-  siglip_model_name: google/siglip-base-patch16-224
-  text_model_name: t5-base
+  siglip_model_name: cache/siglip-base-patch16-224
+  text_model_name: cache/t5-base
   freeze_backbones: true
   cache_language_embeddings: true
 
 training:
   batch_size: 64
-  epochs: 20
+  epochs: 50
   learning_rate: 0.00015
   weight_decay: 0.0001
   lr_scheduler: constant  # options: constant, cosine
   lr_warmup_steps: 0
-  devices: 1
+  devices: 4
   num_nodes: 1
   strategy: auto
   sync_batchnorm: false
@@ -64,7 +64,7 @@ training:
   seed: 42
   deterministic: false
   log_every_n_steps: 10
-  checkpoint_dir: checkpoints/stage1_self_collected_cup
+  checkpoint_dir: checkpoints/self_collected_stage1
   checkpoint_name_params:
     - data.prediction_target
     - training.batch_size
@@ -73,7 +73,7 @@ training:
     - model.num_layers
     - model.num_heads
   checkpoint_every_n_epochs: 5
-  checkpoint_save_top_k: -1
+  checkpoint_save_top_k: 10
   save_last_checkpoint: true
   resume: false
   resume_checkpoint_path: null
@@ -89,12 +89,12 @@ training:
 logging:
   use_wandb: true
   project: trustworthy_tool_manip
-  run_name: stage1_self_collected_cup
+  run_name: self_collected_stage1
   save_dir: logs
-  mode: online
+  mode: offline
 
 inference:
-  checkpoint_dir: checkpoints/stage1_self_collected_cup
+  checkpoint_dir: checkpoints/self_collected_stage1
   checkpoint_name: last.ckpt
   model_dtype: float32
   autocast_dtype: null
