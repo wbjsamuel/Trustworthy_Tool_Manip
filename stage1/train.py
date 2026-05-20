@@ -1,4 +1,5 @@
 import argparse
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,10 @@ except ImportError:  # pragma: no cover - optional dependency
     WandbLogger = None
 
 
+def get_global_rank() -> int:
+    return int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the Stage 1 model.")
     parser.add_argument(
@@ -39,17 +44,27 @@ def parse_args() -> argparse.Namespace:
 
 def build_logger(config: dict):
     logging_config = config.get("logging", {})
+    save_dir = logging_config.get("save_dir", "logs")
+    run_name = logging_config.get("run_name", "stage1")
+
     if logging_config.get("use_wandb", False) and WandbLogger is not None:
+        if get_global_rank() != 0:
+            return CSVLogger(save_dir=save_dir, name=f"{run_name}_rank{get_global_rank()}")
+
+        wandb_mode = logging_config.get("mode", "offline")
+        os.environ["WANDB_MODE"] = wandb_mode
+        os.environ.setdefault("WANDB_START_METHOD", "thread")
+
         logger = WandbLogger(
             project=logging_config["project"],
-            name=logging_config["run_name"],
-            save_dir=logging_config.get("save_dir", "logs"),
-            mode=logging_config.get("mode", "offline"),
+            name=run_name,
+            save_dir=save_dir,
+            mode=wandb_mode,
             config=config,
         )
         return logger
-    save_dir = logging_config.get("save_dir", "logs")
-    return CSVLogger(save_dir=save_dir, name=logging_config.get("run_name", "stage1"))
+
+    return CSVLogger(save_dir=save_dir, name=run_name)
 
 
 def resolve_devices(devices: Any) -> Any:
